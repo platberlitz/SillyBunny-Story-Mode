@@ -1,0 +1,21 @@
+{
+    "display_name": "Story Mode",
+    "author": "platberlitz",
+    "version": "0.1.0",
+    "description": "NovelAI-style co-writing: the chat becomes one continuous manuscript you and the model extend together, with tap-to-edit, retry and undo for continuations, selection rewrites, and a one-shot direction line.",
+    "requires": [],
+    "optional": [],
+    "dependencies": [],
+    "minimum_client_version": "1.7.0",
+    "js": "index.js",
+    "css": "style.css",
+    "license": "AGPL-3.0",
+    "homePage": "https://github.com/platberlitz/SillyBunny-Story-Mode",
+    "loading_order": 150,
+    "auto_update": false,
+    "hooks": {
+        "activate": "activate",
+        "enable": "enable",
+        "disable": "disable"
+    }
+}
