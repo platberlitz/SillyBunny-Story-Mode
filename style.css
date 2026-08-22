@@ -1,6 +1,7 @@
 /* Story Mode - everything about the manuscript look is gated on body.sbstory.
    Moonlit chat styles force layout on `body:is(...) #chat .mes:not(.smallSysMes)` with !important,
-   so the reskin mirrors that specificity (1,3,1) and relies on loading later. */
+   and the bundled mobile paper theme (≤768px) forces bubbles on `.mes` with !important,
+   so the reskin mirrors that specificity and relies on loading later. */
 
 /* ---------------------------------------------------------------- story bar (above the composer) */
 
@@ -9,8 +10,9 @@
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 6px;
-    padding: 4px 6px 2px;
+    gap: 8px;
+    padding: 4px 8px 0;
+    container-type: inline-size;
 }
 
 #sbstory-bar[hidden] {
@@ -18,16 +20,14 @@
 }
 
 #sbstory-bar .sbstory-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding-inline: 10px;
     white-space: nowrap;
 }
 
-#sbstory-bar .sbstory-btn[disabled] {
-    opacity: 0.5;
-    pointer-events: none;
+/* Narrow bar (phones, a narrow chat pane): Continue keeps its label, the history buttons go icon-only. */
+@container (width < 36em) {
+    #sbstory-bar .sbstory-btn:not(.sbstory-primary) .sbstory-btn-label {
+        display: none;
+    }
 }
 
 #sbstory-bar .sbstory-direction-wrap {
@@ -49,13 +49,14 @@
 body.sbstory #chat .mes:not(.smallSysMes):not(.displayNone):not([hidden]) {
     display: block !important;
     grid-template-columns: none !important;
-    max-width: min(72ch, 100%);
-    margin-inline: auto !important;
-    padding: 0 12px 0.4em !important;
+    max-width: min(60ch, 100%);
+    margin: 0 auto !important;
+    padding: 0 12px 0.85em !important;
     background: transparent !important;
     border: 0 !important;
     border-radius: 0 !important;
     box-shadow: none !important;
+    backdrop-filter: none !important;
 }
 
 body.sbstory #chat .mes:not(.smallSysMes)::before,
@@ -86,7 +87,8 @@ body.sbstory #chat .mes:not(.smallSysMes) .mes_block {
     background: transparent !important;
 }
 
-/* Float message controls beside the opening line instead of covering manuscript text. */
+/* Message controls float beside the opening line instead of covering manuscript text.
+   The host already dims the icons and brightens them on hover. */
 body.sbstory #chat .mes:not(.smallSysMes) .ch_name {
     position: relative;
     float: right;
@@ -99,20 +101,6 @@ body.sbstory #chat .mes:not(.smallSysMes) .ch_name {
     flex-wrap: wrap;
     background: transparent !important;
     justify-content: flex-end;
-    opacity: 0.35;
-    transition: opacity 180ms ease-out;
-}
-
-body.sbstory #chat .mes:not(.smallSysMes):hover .ch_name,
-body.sbstory #chat .mes:not(.smallSysMes):focus-within .ch_name,
-body.sbstory #chat .mes:not(.smallSysMes):has(.edit_textarea) .ch_name {
-    opacity: 1;
-}
-
-@media (hover: none) {
-    body.sbstory #chat .mes:not(.smallSysMes) .ch_name {
-        opacity: 1;
-    }
 }
 
 body.sbstory #chat .mes:not(.smallSysMes) .mes_text {
@@ -180,12 +168,17 @@ body.sbstory #chat .mes:has(+ .mes[data-sbstory-join]) .mes_text > p:last-child 
 body.sbstory #chat .mes:has(.edit_textarea) {
     background: color-mix(in srgb, var(--SmartThemeQuoteColor) 6%, transparent) !important;
     box-shadow: none !important;
-    border-radius: 8px !important;
+    border-radius: var(--sb-radius-md, 16px) !important;
 }
 
 body.sbstory #chat .mes:has(.edit_textarea) .ch_name {
     float: none;
     width: 100% !important;
+}
+
+/* The host clips .mes_block; the rewrite row below has to escape that clip to stick. */
+body.sbstory #chat .mes:has(.edit_textarea) .mes_block {
+    overflow: visible !important;
 }
 
 body.sbstory #chat .mes .edit_textarea {
@@ -204,17 +197,26 @@ body.sbstory #chat .mes .edit_textarea {
 
 body.sbstory #chat .mes .edit_textarea:focus-visible {
     outline: none;
-    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--sb-focus-ring, var(--SmartThemeQuoteColor)) 55%, transparent) !important;
+    box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--sb-focus-ring, var(--SmartThemeQuoteColor)) 70%, transparent) !important;
 }
 
-/* ---------------------------------------------------------------- rewrite row (shown above the edit box when text is selected) */
+/* ---------------------------------------------------------------- rewrite row (under the edit box while text is selected) */
 
 .sbstory-transforms {
+    position: sticky;
+    bottom: 4px;
+    z-index: 2;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 4px;
-    margin: 0 0 6px;
+    margin: 8px 0 0;
+    padding: 4px;
+    border-radius: var(--sb-radius-sm, 10px);
+    /* The theme tint is ~90% opaque; drop its alpha so the text underneath does not ghost through. */
+    background: var(--SmartThemeBlurTintColor);
+    background: rgb(from var(--SmartThemeBlurTintColor) r g b);
+    box-shadow: 0 4px 8px color-mix(in srgb, var(--SmartThemeShadowColor, #000) 16%, transparent);
 }
 
 .sbstory-transforms[hidden] {
@@ -225,48 +227,18 @@ body.sbstory #chat .mes .edit_textarea:focus-visible {
     display: none;
 }
 
-.sbstory-transforms .sbstory-tbtn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding-inline: 8px;
-    font-size: calc(var(--mainFontSize) * 0.85);
-}
-
+/* The status is a <small>, so the host's hint styling applies. */
 .sbstory-transforms .sbstory-tstatus {
-    font-size: calc(var(--mainFontSize) * 0.8);
-    opacity: 0.75;
-}
-
-.sbstory-transforms[data-busy] .sbstory-tbtn:not(.sbstory-stop) {
-    opacity: 0.5;
-    pointer-events: none;
+    flex-basis: 100%;
 }
 
 /* ---------------------------------------------------------------- settings drawer */
-
-#sbstory-settings > .inline-drawer-toggle {
-    width: 100%;
-    border: 0;
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    text-align: start;
-}
-
-#sbstory-settings .sbstory-drawer-icon {
-    transition: transform var(--animation-duration, 125ms);
-}
-
-#sbstory-settings > .inline-drawer-toggle[aria-expanded="true"] .sbstory-drawer-icon {
-    transform: rotate(180deg);
-}
 
 #sbstory-settings .sbstory-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-block: 6px;
+    margin-block: 4px;
 }
 
 #sbstory-settings .sbstory-field {
@@ -276,39 +248,29 @@ body.sbstory #chat .mes .edit_textarea:focus-visible {
     margin-block: 8px;
 }
 
-#sbstory-settings .sbstory-hint {
-    opacity: 0.7;
-}
-
 #sbstory-settings .sbstory-textarea {
     min-height: 90px;
     resize: vertical;
-}
-
-#sbstory-settings .sbstory-section-title {
-    font-weight: 700;
-    margin-block: 10px 2px;
-}
-
-#sbstory-settings .sbstory-card-section {
-    padding: 6px 8px;
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 10px;
-    margin-block: 6px;
 }
 
 #sbstory-settings .sbstory-reset {
     align-self: flex-start;
 }
 
-/* ---------------------------------------------------------------- motion */
+/* ---------------------------------------------------------------- wand entry */
 
-@media (prefers-reduced-motion: reduce) {
-    body.sbstory #chat .mes:not(.smallSysMes) .ch_name {
-        transition: none;
-    }
+#sbstory-menu-item .sbstory-menu-state {
+    margin-left: auto;
+    padding: 2px 8px;
+    border-radius: var(--sb-radius-button, 14px);
+    font-size: calc(var(--mainFontSize) * 0.72);
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1.35;
+    opacity: 0.7;
 }
 
-body.reduced-motion.sbstory #chat .mes:not(.smallSysMes) .ch_name {
-    transition: none;
+#sbstory-menu-item .sbstory-menu-state[data-on] {
+    opacity: 1;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
 }

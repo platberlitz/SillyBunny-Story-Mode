@@ -161,16 +161,20 @@ test('Story continuation pauses host Auto-continue and restores it afterwards', 
     assert.deepEqual(getCuts(context.chat[0]), [5]);
 });
 
-test('host generation state blocks Story actions and ignores nested quiet terminals', async () => {
+test('the host generating markers block Story actions until they clear, with or without GENERATION_ENDED', async () => {
     const { calls } = use({ chat: [{ is_user: false, mes: 'Start' }] });
-    api.onGenerationStarted('normal');
-    api.onGenerationStarted('quiet');
-    api.onGenerationFinished();
-    assert.equal(api.isBusy(), true);
-    assert.equal(await api.continueStory(), false);
-    assert.equal(calls.generate.length, 0);
-    api.onGenerationFinished();
-    assert.equal(api.isBusy(), false);
+    globalThis.document = { body: { dataset: { generating: 'true' } }, getElementById: () => null };
+    try {
+        api.onGenerationStarted('normal');
+        assert.equal(api.isBusy(), true);
+        assert.equal(await api.continueStory(), false);
+        assert.equal(calls.generate.length, 0);
+        delete document.body.dataset.generating;
+        api.refreshBusy();
+        assert.equal(api.isBusy(), false);
+    } finally {
+        delete globalThis.document;
+    }
 });
 
 test('continue refuses while a continuation is running or when there is nothing to continue', async () => {

@@ -10,6 +10,7 @@ import { BODY_CLASS, parseStoryArg } from './src/core.js';
 const subscriptions = [];
 let active = false;
 let observer = null;
+let busyObserver = null;
 let stampFrame = 0;
 
 function ctx() {
@@ -69,6 +70,7 @@ function scheduleStamp() {
         }
         try {
             ui.stampBlocks();
+            ui.refreshBar();
         } catch (error) {
             console.warn('[Story Mode] stamping failed', error);
         }
@@ -129,11 +131,25 @@ function observeChat() {
     }
     observer = new MutationObserver(() => {
         ui.checkEditor();
-        scheduleStamp();
+        // Streaming mutates the last block on every chunk; the end-of-generation hook stamps once instead.
+        if (document.body.dataset.generating !== 'true') {
+            scheduleStamp();
+        }
     });
     observer.observe(chat, { childList: true, subtree: true });
     ui.checkEditor();
     ui.refreshTransformRow();
+}
+
+/** The bar follows the host's generating markers directly; GENERATION_ENDED does not fire on narrow viewports. */
+function observeBusy() {
+    const sendForm = document.getElementById('send_form');
+    if (busyObserver || !sendForm) {
+        return;
+    }
+    busyObserver = new MutationObserver(() => api.refreshBusy());
+    busyObserver.observe(document.body, { attributes: true, attributeFilter: ['data-generating'] });
+    busyObserver.observe(sendForm, { attributes: true, attributeFilter: ['class'] });
 }
 
 function mountAll() {
@@ -145,6 +161,7 @@ function mountAll() {
     ui.ensureMenuItem({ onToggle: () => setEnabled(!api.isEnabled(), { renderDrawer: true }) });
     ui.ensureDrawer({ onChatToggle: setEnabled, onChange: () => apply({ renderDrawer: false }) });
     observeChat();
+    observeBusy();
     api.registerCommands({ onToggle: onStoryCommand });
     apply();
     ui.setBusy(api.isBusy());
@@ -202,8 +219,8 @@ function start() {
             });
         }
         subscribe(context, events.GENERATION_STARTED, api.onGenerationStarted);
-        subscribe(context, events.GENERATION_ENDED, api.onGenerationFinished);
-        subscribe(context, events.GENERATION_STOPPED, api.onGenerationFinished);
+        subscribe(context, events.GENERATION_ENDED, api.refreshBusy);
+        subscribe(context, events.GENERATION_STOPPED, api.refreshBusy);
         for (const name of ['MORE_MESSAGES_LOADED', 'CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED']) {
             subscribe(context, events[name], scheduleStamp);
         }
@@ -216,6 +233,8 @@ function start() {
         unsubscribeAll();
         observer?.disconnect();
         observer = null;
+        busyObserver?.disconnect();
+        busyObserver = null;
         cancelAnimationFrame(stampFrame);
         ui.unmountAll();
         throw error;
@@ -227,13 +246,14 @@ async function stop() {
     unsubscribeAll();
     observer?.disconnect();
     observer = null;
+    busyObserver?.disconnect();
+    busyObserver = null;
     cancelAnimationFrame(stampFrame);
     try {
         if (!api.isInflight()) {
             api.clearRules();
             api.clearDirection();
         }
-        api.resetHostBusy();
         api.clearRedo();
     } catch (error) {
         console.warn('[Story Mode] cleanup skipped a step', error);

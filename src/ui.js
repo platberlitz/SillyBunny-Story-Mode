@@ -28,6 +28,7 @@ let lastEditorId = null;
 let selectionFrame = 0;
 let transformTextarea = null;
 let listenerController = null;
+let drawerIconObserver = null;
 
 export function el(tag, { className = '', text = '', attrs = {} } = {}) {
     const node = document.createElement(tag);
@@ -46,8 +47,8 @@ export function el(tag, { className = '', text = '', attrs = {} } = {}) {
     return node;
 }
 
-function iconButton({ id, icon, label, title, className = 'menu_button sbstory-btn', onClick }) {
-    const button = el('button', { className, attrs: { type: 'button', id, title: title || label } });
+function iconButton({ id, icon, label, title, className = 'menu_button menu_button_icon sbstory-btn', onClick }) {
+    const button = el('button', { className, attrs: { type: 'button', id, title: title || label, 'aria-label': label } });
     button.append(
         el('i', { className: `fa-solid ${icon}`, attrs: { 'aria-hidden': 'true' } }),
         el('span', { className: 'sbstory-btn-label', text: label }),
@@ -72,23 +73,31 @@ export function mountBar() {
         placeBar();
         return bar;
     }
-    bar = el('div', { className: 'flex-container flexGap5 sbstory-bar', attrs: { id: BAR_ID, hidden: true, role: 'toolbar', 'aria-label': 'Story Mode' } });
+    bar = el('div', { className: 'flex-container flexGap5 sbstory-bar', attrs: { id: BAR_ID, hidden: true, role: 'group', 'aria-label': 'Story Mode' } });
     directionWrap = el('div', { className: 'sbstory-direction-wrap', attrs: { id: 'sbstory-direction-wrap', hidden: true } });
     directionInput = el('input', {
         className: 'text_pole sbstory-direction',
         attrs: {
             id: 'sbstory-direction',
             type: 'text',
-            placeholder: 'Where should the next passage go? Used once, then cleared.',
+            placeholder: 'Where should the next passage go?',
             'aria-label': 'Direction for the next passage',
             autocomplete: 'off',
         },
     });
     directionInput.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' && !event.isComposing) {
+        if (event.isComposing) {
+            return;
+        }
+        if (event.key === 'Enter') {
             event.preventDefault();
             event.stopImmediatePropagation();
             void onContinue();
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            toggleDirection();
+            document.getElementById('send_textarea')?.focus();
         }
     });
     directionWrap.append(directionInput);
@@ -96,7 +105,7 @@ export function mountBar() {
     directionToggle.setAttribute('aria-controls', 'sbstory-direction-wrap');
     directionToggle.setAttribute('aria-expanded', 'false');
     bar.append(
-        iconButton({ id: 'sbstory-continue', icon: 'fa-feather-pointed', label: 'Continue', title: 'Continue the story from where the text stops. Text in the box is added first.', onClick: onContinue }),
+        iconButton({ id: 'sbstory-continue', icon: 'fa-feather-pointed', label: 'Continue', title: 'Continue the story from where the text stops. Text in the box is added first.', className: 'menu_button menu_button_icon sbstory-btn sbstory-primary', onClick: onContinue }),
         iconButton({ id: 'sbstory-retry', icon: 'fa-arrows-rotate', label: 'Retry', title: 'Redo the last continuation', onClick: () => api.retry() }),
         iconButton({ id: 'sbstory-undo', icon: 'fa-rotate-left', label: 'Undo', title: 'Remove the last continuation', onClick: () => api.undo() }),
         iconButton({ id: 'sbstory-redo', icon: 'fa-rotate-right', label: 'Redo', title: 'Put the last removed continuation back', onClick: () => api.redo() }),
@@ -157,6 +166,23 @@ export function setBusy(busy) {
             button.disabled = Boolean(busy);
         }
     }
+    if (!busy) {
+        refreshBar();
+    }
+}
+
+/** Undo/Retry/Redo only light up when the last block can actually be taken back or put back. */
+export function refreshBar() {
+    if (!bar || bar.hasAttribute('data-busy')) {
+        return;
+    }
+    const revertable = api.canUndo();
+    for (const [id, enabled] of [['sbstory-undo', revertable], ['sbstory-retry', revertable], ['sbstory-redo', api.canRedo()]]) {
+        const button = document.getElementById(id);
+        if (button) {
+            button.disabled = !enabled;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- selection rewrites (inside the host editor)
@@ -165,7 +191,7 @@ export function mountTransformRow() {
     if (row) {
         return row;
     }
-    row = el('div', { className: 'sbstory-transforms', attrs: { id: ROW_ID, hidden: true, role: 'toolbar', 'aria-label': 'Rewrite the selected text' } });
+    row = el('div', { className: 'sbstory-transforms', attrs: { id: ROW_ID, hidden: true, role: 'group', 'aria-label': 'Rewrite the selected text' } });
     for (const [kind, label, icon, title] of [
         ['rewrite', 'Rewrite', 'fa-pen-nib', 'Rewrite the selection for clarity and flow'],
         ['expand', 'Expand', 'fa-up-right-and-down-left-from-center', 'Expand the selection with more detail'],
@@ -176,7 +202,7 @@ export function mountTransformRow() {
     }
     rowStop = iconButton({ icon: 'fa-stop', label: 'Stop', title: 'Stop waiting for the rewrite', className: 'menu_button sbstory-tbtn sbstory-stop', onClick: () => abortController?.abort() });
     rowStop.hidden = true;
-    rowStatus = el('span', { className: 'sbstory-tstatus', attrs: { 'aria-live': 'polite' } });
+    rowStatus = el('small', { className: 'sbstory-tstatus', attrs: { 'aria-live': 'polite' } });
     row.append(rowStop, rowStatus);
     return row;
 }
@@ -216,8 +242,8 @@ export function refreshTransformRow() {
         pendingSelection = selection;
     }
     const host = textarea.parentElement;
-    if (host && (row.parentElement !== host || row.nextElementSibling !== textarea)) {
-        host.insertBefore(row, textarea);
+    if (host && (row.parentElement !== host || row.previousElementSibling !== textarea)) {
+        host.insertBefore(row, textarea.nextSibling);
     }
     row.hidden = false;
 }
@@ -305,6 +331,7 @@ async function runTransform(kind) {
             textarea.setRangeText(result, start, end, 'select');
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
         }
+        textarea.setSelectionRange(start, start + result.length);
         setStatus(undoable ? 'Replaced. Ctrl+Z undoes it; Done or Escape keeps it.' : 'Replaced. Done or Escape keeps it.');
     } catch (error) {
         if (controller.signal.aborted || error?.name === 'AbortError') {
@@ -531,8 +558,48 @@ export function bindClickToEdit() {
             return;
         }
         button.click();
+        revealEditor();
         showEditHintOnce();
     }, { signal: listenerController.signal });
+}
+
+/**
+ * The host keeps the chat's scroll position when an editor opens, so a tap near
+ * the bottom leaves the box off-screen. It also re-anchors the chat for eight
+ * frames after every resize of the block (and, on narrow viewports, restores the
+ * old position 200ms after opening), undoing any earlier scroll; reveal the box
+ * once the block has stopped resizing and that window has passed.
+ */
+function revealEditor() {
+    const mes = document.getElementById('curEditTextarea')?.closest('.mes');
+    if (!mes) {
+        return;
+    }
+    const notBefore = performance.now() + 260;
+    let frame = 0;
+    let frames = 0;
+    const observer = new ResizeObserver(() => arm());
+    const reveal = () => {
+        observer.disconnect();
+        cancelAnimationFrame(frame);
+        document.getElementById('curEditTextarea')?.scrollIntoView({ block: 'nearest' });
+    };
+    const tick = () => {
+        frames++;
+        if (frames >= 10 && performance.now() >= notBefore) {
+            reveal();
+            return;
+        }
+        frame = requestAnimationFrame(tick);
+    };
+    const arm = () => {
+        cancelAnimationFrame(frame);
+        frames = 0;
+        frame = requestAnimationFrame(tick);
+    };
+    observer.observe(mes);
+    arm();
+    setTimeout(reveal, 1500);
 }
 
 export function bindEscapeSave() {
@@ -588,8 +655,9 @@ export function ensureMenuItem({ onToggle }) {
         // Wand entries must be divs: the host styles `#extensionsMenu > div`.
         menuItem = el('div', { className: 'list-group-item flex-container flexGap5 interactable', attrs: { id: MENU_ITEM_ID, role: 'button', tabindex: '0' } });
         menuItem.append(
-            el('span', { className: 'fa-solid fa-feather-pointed extensionsMenuExtensionButton', attrs: { 'aria-hidden': 'true' } }),
+            el('div', { className: 'fa-solid fa-feather-pointed extensionsMenuExtensionButton', attrs: { 'aria-hidden': 'true' } }),
             el('span', { className: 'sbstory-menu-label', text: 'Story Mode' }),
+            el('span', { className: 'sbstory-menu-state' }),
         );
         const activate = (event) => {
             event.preventDefault();
@@ -615,10 +683,12 @@ export function refreshMenuItem(enabled) {
     if (!menuItem) {
         return;
     }
-    const label = menuItem.querySelector('.sbstory-menu-label');
-    if (label) {
-        label.textContent = enabled ? 'Story Mode: on (tap to turn off)' : 'Story Mode: off (tap to turn on)';
+    const state = menuItem.querySelector('.sbstory-menu-state');
+    if (state) {
+        state.textContent = enabled ? 'On' : 'Off';
+        state.toggleAttribute('data-on', Boolean(enabled));
     }
+    menuItem.title = enabled ? 'Turn Story Mode off for this chat' : 'Turn Story Mode on for this chat';
     menuItem.setAttribute('aria-pressed', String(Boolean(enabled)));
     menuItem.setAttribute('role', 'button');
 }
@@ -633,11 +703,21 @@ export function ensureDrawer(handlers) {
     }
     if (!drawer) {
         drawer = el('div', { className: 'inline-drawer sbstory-drawer', attrs: { id: DRAWER_ID, 'data-extension-name': 'SillyBunny-Story-Mode' } });
-        const toggle = el('button', { className: 'inline-drawer-toggle inline-drawer-header', attrs: { type: 'button', 'aria-expanded': 'false', 'aria-controls': `${DRAWER_ID}-content` } });
-        toggle.append(el('b', { text: 'Story Mode' }), el('span', { className: 'sbstory-drawer-icon fa-solid fa-circle-chevron-down', attrs: { 'aria-hidden': 'true' } }));
-        toggle.addEventListener('click', () => {
-            toggle.setAttribute('aria-expanded', String(toggle.getAttribute('aria-expanded') !== 'true'));
+        // Same markup as every bundled drawer so host and theme CSS style it; the host toggles it on click.
+        const toggle = el('div', { className: 'inline-drawer-toggle inline-drawer-header', attrs: { role: 'button', tabindex: '0', 'aria-expanded': 'false', 'aria-controls': `${DRAWER_ID}-content` } });
+        // tabindex -1: keyboard.js would otherwise make the icon a second, silent tab stop inside the header button.
+        const icon = el('div', { className: 'fa-solid fa-circle-chevron-down inline-drawer-icon down', attrs: { 'aria-hidden': 'true', tabindex: '-1' } });
+        toggle.append(el('b', { text: 'Story Mode' }), icon);
+        toggle.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                event.stopPropagation();
+                toggle.click();
+            }
         });
+        // The host flips the icon's classes on click and when it restores a remembered open state; mirror that into ARIA.
+        drawerIconObserver = new MutationObserver(() => toggle.setAttribute('aria-expanded', String(icon.classList.contains('up'))));
+        drawerIconObserver.observe(icon, { attributes: true, attributeFilter: ['class'] });
         const content = el('div', { className: 'inline-drawer-content', attrs: { id: `${DRAWER_ID}-content` } });
         drawer.append(toggle, content);
     }
@@ -647,7 +727,7 @@ export function ensureDrawer(handlers) {
     renderDrawer();
 }
 
-function checkboxRow({ id, label, checked, onChange, hint = '' }) {
+function checkboxRow({ id, label, checked, onChange }) {
     const wrap = el('label', { className: 'checkbox_label sbstory-row', attrs: { for: id } });
     const input = el('input', { attrs: { type: 'checkbox', id } });
     input.checked = Boolean(checked);
@@ -667,9 +747,6 @@ function checkboxRow({ id, label, checked, onChange, hint = '' }) {
         }
     });
     wrap.append(input, el('span', { text: label }));
-    if (hint) {
-        wrap.title = hint;
-    }
     return wrap;
 }
 
@@ -678,7 +755,7 @@ function field(labelText, control, hint = '') {
     const label = el('label', { text: labelText, attrs: { for: control.id } });
     wrap.append(label, control);
     if (hint) {
-        wrap.append(el('small', { className: 'sbstory-hint', text: hint }));
+        wrap.append(el('small', { text: hint }));
     }
     return wrap;
 }
@@ -717,13 +794,13 @@ export function renderDrawer() {
     }));
 
     if (character) {
-        const section = el('div', { className: 'sbstory-card-section' });
-        section.append(el('div', { className: 'sbstory-section-title', text: `This card: ${character.name ?? 'character'}` }));
+        const section = el('div');
+        section.append(el('h4', { text: `This card: ${character.name ?? 'character'}` }));
+        section.append(el('small', { text: 'Saved inside the card, so they travel with it.' }));
         section.append(checkboxRow({
             id: 'sbstory-opt-card-default',
             label: 'Open this character\'s chats in Story Mode',
             checked: card?.default === true,
-            hint: 'Stored in the card, so it travels with it.',
             onChange: async (value) => {
                 await api.setCardConfig({ default: value });
                 drawerHandlers.onChange?.();
@@ -817,6 +894,7 @@ export function applyState(enabled) {
     if (bar) {
         placeBar();
         bar.hidden = !enabled;
+        refreshBar();
     }
     refreshMenuItem(enabled);
     if (enabled) {
@@ -846,6 +924,8 @@ export function unmountAll() {
     }
     document.body.classList.remove(BODY_CLASS, 'sbstory-serif', 'sbstory-notint');
     cleanupStamps();
+    drawerIconObserver?.disconnect();
+    drawerIconObserver = null;
     bar?.remove();
     row?.remove();
     menuItem?.remove();

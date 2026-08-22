@@ -119,6 +119,18 @@ export function classifyBlock(message) {
     return { origin: 'user', cut: null, cuts };
 }
 
+/** Undo/Retry apply to a block with a recorded continuation, or a plain model block; a stale-cut block is left alone. */
+export function canRevertBlock(message) {
+    if (!message) {
+        return false;
+    }
+    if (getCuts(message).length > 0) {
+        return true;
+    }
+    const stamped = Boolean(message.extra && typeof message.extra === 'object' && Object.hasOwn(message.extra, EXTRA_KEY));
+    return !stamped && !message.is_user && !message.is_system;
+}
+
 /** Indices of blocks whose previous visible block stopped mid-sentence. */
 export function computeJoins(chat) {
     const joins = new Set();

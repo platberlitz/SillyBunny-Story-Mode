@@ -12,6 +12,7 @@ import {
     buildDirection,
     buildRules,
     buildTransformPrompt,
+    canRevertBlock,
     cleanTransformResult,
     contextWindow,
     getCuts,
@@ -303,8 +304,6 @@ export function onMessageEdited(index) {
 // ---------------------------------------------------------------- generation lifecycle
 
 let inflight = null;
-let hostBusy = false;
-let ignoredGenerationEnds = 0;
 const hooks = { beforeGeneration: null, afterGeneration: null, busyChanged: null };
 
 export function setHooks(partial) {
@@ -317,37 +316,34 @@ export function isInflight() {
 
 export function resetInflight() {
     inflight = null;
-    resetHostBusy();
+    refreshBusy();
 }
 
-export function resetHostBusy() {
-    hostBusy = false;
-    ignoredGenerationEnds = 0;
+/**
+ * The host's own generating markers are the truth. GENERATION_ENDED is not a
+ * reliable terminal: on the mobile shell it never arrived after a streamed
+ * continue (verified live 2026-08-22), so a flag set on GENERATION_STARTED would stick.
+ */
+function hostGenerating() {
+    if (typeof document === 'undefined') {
+        return false;
+    }
+    return document.body?.dataset?.generating === 'true'
+        || Boolean(document.getElementById?.('send_form')?.classList?.contains('sb-generating-controls'));
+}
+
+export function refreshBusy() {
     hooks.busyChanged?.(isBusy());
 }
 
 export function onGenerationStarted(type, _options, dryRun = false) {
-    if (dryRun) {
+    if (dryRun || type === 'quiet') {
         return;
     }
-    if (type === 'quiet') {
-        ignoredGenerationEnds++;
-        return;
-    }
-    hostBusy = true;
     if (!inflight) {
         clearRedo();
     }
-    hooks.busyChanged?.(isBusy());
-}
-
-export function onGenerationFinished() {
-    if (ignoredGenerationEnds > 0) {
-        ignoredGenerationEnds--;
-        return;
-    }
-    hostBusy = false;
-    hooks.busyChanged?.(isBusy());
+    refreshBusy();
 }
 
 /** MESSAGE_SENT: the host just added the composer text as a user block; record where the model's text will start. */
@@ -407,9 +403,7 @@ export async function finishOpenEdit() {
 let busy = false;
 
 export function isBusy() {
-    const hostControls = typeof document !== 'undefined'
-        && document.getElementById?.('send_form')?.classList?.contains('sb-generating-controls');
-    return busy || hostBusy || Boolean(hostControls);
+    return busy || hostGenerating();
 }
 
 async function locked(action) {
@@ -531,6 +525,10 @@ export function clearRedo() {
 
 export function canRedo() {
     return redoStack().length > 0;
+}
+
+export function canUndo() {
+    return canRevertBlock(messageAt(lastIndex()));
 }
 
 function redoMatches(entry, chat, key) {

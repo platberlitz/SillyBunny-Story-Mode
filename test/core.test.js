@@ -19,6 +19,7 @@ import {
     parseStoryArg,
     resolveEnabled,
     textRevision,
+    canRevertBlock,
 } from '../src/core.js';
 
 function withCuts(message, cuts) {
@@ -165,4 +166,14 @@ test('parseStoryArg understands on, off, toggle and rejects junk', () => {
     assert.equal(parseStoryArg(undefined, false), true);
     assert.equal(parseStoryArg('toggle', false), true);
     assert.equal(parseStoryArg('maybe', false), null);
+});
+
+test('canRevertBlock allows recorded continuations and plain model blocks only', () => {
+    const withCut = { is_user: true, mes: 'She opened the door and the lantern guttered.', extra: { story_mode: { cuts: [23], revision: textRevision('She opened the door and the lantern guttered.') } } };
+    assert.equal(canRevertBlock(withCut), true);
+    assert.equal(canRevertBlock({ is_user: false, mes: 'model text' }), true);
+    assert.equal(canRevertBlock({ is_user: true, mes: 'yours' }), false);
+    assert.equal(canRevertBlock({ is_user: false, is_system: true, mes: 'hidden' }), false);
+    assert.equal(canRevertBlock({ is_user: true, mes: 'edited since', extra: { story_mode: { cuts: [2], revision: 'stale' } } }), false);
+    assert.equal(canRevertBlock(null), false);
 });
