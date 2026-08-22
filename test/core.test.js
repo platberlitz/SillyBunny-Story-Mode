@@ -145,9 +145,12 @@ test('cleanTransformResult strips fences, labels and unwanted wrapping quotes', 
 test('normalizeSettings applies defaults and keeps valid values', () => {
     assert.deepEqual(normalizeSettings(undefined), { ...DEFAULT_SETTINGS });
     assert.deepEqual(normalizeSettings('junk'), { ...DEFAULT_SETTINGS });
-    const custom = normalizeSettings({ defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: ' ', maxTokens: '240', transformsUseFullContext: true, extra: 1 });
-    assert.deepEqual(custom, { defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: DEFAULT_SETTINGS.lengthHint, maxTokens: 240, transformsUseFullContext: true });
+    const custom = normalizeSettings({ defaultOn: true, shading: true, serif: true, rules: 'R', lengthHint: ' ', maxTokens: '240', transformsUseFullContext: true, extra: 1 });
+    assert.deepEqual(custom, { defaultOn: true, shading: true, serif: true, rules: 'R', lengthHint: DEFAULT_SETTINGS.lengthHint, maxTokens: 240, transformsUseFullContext: true, agentGate: false, allowedAgents: [] });
+    assert.equal(normalizeSettings({ tint: true }).shading, false, 'the old tint flag is not carried over');
     assert.equal(normalizeSettings({ maxTokens: 0 }).maxTokens, 0);
+    assert.deepEqual(normalizeSettings({ agentGate: true, allowedAgents: ['a', 'a', 3, '', 'b'] }).allowedAgents, ['a', 'b']);
+    assert.equal(normalizeSettings({ agentGate: 'yes' }).agentGate, false);
     assert.equal(normalizeSettings({ maxTokens: -5 }).maxTokens, DEFAULT_SETTINGS.maxTokens);
     assert.equal(normalizeSettings({ maxTokens: 'lots' }).maxTokens, DEFAULT_SETTINGS.maxTokens);
 });

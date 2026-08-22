@@ -403,7 +403,7 @@ export function stampBlocks() {
         return;
     }
     const joins = computeJoins(chat);
-    const tint = api.getSettings().tint;
+    const shading = api.getSettings().shading;
     for (const mesEl of document.querySelectorAll('#chat .mes[mesid]')) {
         const index = Number(mesEl.getAttribute('mesid'));
         const message = chat[index];
@@ -417,7 +417,7 @@ export function stampBlocks() {
         } else {
             delete mesEl.dataset.sbstoryJoin;
         }
-        if (origin === 'mixed' && tint) {
+        if (origin === 'mixed' && shading) {
             wrapTail(mesEl, message, index, cut);
         } else {
             unwrapTail(mesEl);
@@ -827,11 +827,11 @@ export function renderDrawer() {
     }
 
     content.append(checkboxRow({
-        id: 'sbstory-opt-tint',
+        id: 'sbstory-opt-shading',
         label: 'Shade the model\'s text',
-        checked: settings.tint,
+        checked: settings.shading,
         onChange: (value) => {
-            api.updateSettings({ tint: value });
+            api.updateSettings({ shading: value });
             drawerHandlers.onChange?.();
         },
     }));
@@ -883,6 +883,48 @@ export function renderDrawer() {
     });
     content.append(field('Longest continuation, in tokens', cap, 'The reply is cut off here, like NovelAI\'s output length; press Continue again to keep going. 0 uses your preset\'s response length.'));
 
+    const agentSection = el('div');
+    agentSection.append(el('h4', { text: 'In-Chat Agents' }));
+    const agents = api.listAgents();
+    if (agents === null) {
+        agentSection.append(el('small', { text: 'In-Chat Agents is not available, so every agent behaves as usual.' }));
+    } else {
+        agentSection.append(checkboxRow({
+            id: 'sbstory-opt-agent-gate',
+            label: 'Only the agents ticked below run while Story Mode is on',
+            checked: settings.agentGate,
+            onChange: (value) => {
+                api.updateSettings({ agentGate: value });
+                drawerHandlers.onChange?.();
+            },
+        }));
+        if (agents.length === 0) {
+            agentSection.append(el('small', { text: 'You have no agents yet. Add some in the Agents tab and they will show up here.' }));
+        }
+        const allowed = new Set(settings.allowedAgents);
+        for (const agent of agents) {
+            agentSection.append(checkboxRow({
+                id: `sbstory-opt-agent-${agent.id}`,
+                label: agent.enabled ? agent.name : `${agent.name} (switched off in Agents)`,
+                checked: allowed.has(agent.id),
+                onChange: (value) => {
+                    const next = new Set(api.getSettings().allowedAgents);
+                    if (value) {
+                        next.add(agent.id);
+                    } else {
+                        next.delete(agent.id);
+                    }
+                    api.updateSettings({ allowedAgents: [...next] });
+                    api.applyAgentGate();
+                },
+            }));
+        }
+        if (agents.length > 0) {
+            agentSection.append(el('small', { text: 'Unticked agents are paused while a Story Mode chat is open (they show as off in the Agents tab meanwhile); nothing about them is saved, and they come back when Story Mode is off.' }));
+        }
+    }
+    content.append(agentSection);
+
     content.append(checkboxRow({
         id: 'sbstory-opt-fullctx',
         label: 'Rewrites see the whole story (slower, costs more, matches voice better)',
@@ -899,7 +941,7 @@ export function applyState(enabled) {
     const settings = api.getSettings();
     document.body.classList.toggle(BODY_CLASS, enabled);
     document.body.classList.toggle('sbstory-serif', enabled && settings.serif);
-    document.body.classList.toggle('sbstory-notint', enabled && !settings.tint);
+    document.body.classList.toggle('sbstory-shade', enabled && settings.shading);
     if (bar) {
         placeBar();
         bar.hidden = !enabled;
@@ -931,7 +973,7 @@ export function unmountAll() {
     if (chat) {
         delete chat.dataset.sbstoryBound;
     }
-    document.body.classList.remove(BODY_CLASS, 'sbstory-serif', 'sbstory-notint');
+    document.body.classList.remove(BODY_CLASS, 'sbstory-serif', 'sbstory-shade');
     cleanupStamps();
     drawerIconObserver?.disconnect();
     drawerIconObserver = null;

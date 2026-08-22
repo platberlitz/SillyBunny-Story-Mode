@@ -779,6 +779,87 @@ export function retry() {
     });
 }
 
+// ---------------------------------------------------------------- in-chat agents gate
+
+/**
+ * The host's In-Chat Agents decide what runs from each agent's global enabled
+ * flag, read from event handlers and from their own timers alike. There is no
+ * per-chat switch and no veto hook, so while Story Mode is on in the open chat
+ * the non-allowed agents are kept switched off in memory (never saved; a reload
+ * restores them from disk) and switched back on when the mode or the chat changes.
+ */
+let agentStore = null;
+let agentStoreLoad = null;
+const gatedAgents = [];
+
+export function loadAgentStore() {
+    agentStoreLoad ??= import('/scripts/extensions/in-chat-agents/agent-store.js')
+        .then((mod) => {
+            agentStore = typeof mod?.getAgents === 'function' && typeof mod?.getEnabledAgents === 'function' && typeof mod?.setAgentEnabledForScope === 'function' ? mod : null;
+            return agentStore;
+        })
+        .catch(() => {
+            agentStore = null;
+            return null;
+        });
+    return agentStoreLoad;
+}
+
+export function hasAgentStore() {
+    return agentStore !== null;
+}
+
+/** Every agent the user has, for the settings list; null when In-Chat Agents is not available. */
+export function listAgents(store = agentStore) {
+    if (!store) {
+        return null;
+    }
+    return store.getAgents().map((agent) => ({
+        id: String(agent.id ?? ''),
+        name: String(agent.name ?? '').trim() || 'Unnamed agent',
+        enabled: typeof store.isAgentEnabledForCurrentScope === 'function' ? Boolean(store.isAgentEnabledForCurrentScope(agent)) : Boolean(agent.enabled),
+    })).filter((agent) => agent.id);
+}
+
+/**
+ * Makes the in-memory agent flags match the allow-list for the current chat:
+ * gated while Story Mode is on here and the setting is on, released otherwise.
+ * Returns the ids currently held off.
+ */
+export function applyAgentGate(store = agentStore) {
+    if (!store) {
+        return [];
+    }
+    const settings = getSettings();
+    const active = settings.agentGate && isEnabled();
+    const allowed = new Set(settings.allowedAgents);
+    for (const agent of gatedAgents.splice(0)) {
+        if (active && !allowed.has(String(agent.id))) {
+            gatedAgents.push(agent);
+        } else {
+            store.setAgentEnabledForScope(agent, true);
+        }
+    }
+    if (active) {
+        for (const agent of store.getEnabledAgents()) {
+            if (!allowed.has(String(agent.id)) && !gatedAgents.includes(agent)) {
+                store.setAgentEnabledForScope(agent, false);
+                gatedAgents.push(agent);
+            }
+        }
+    }
+    return gatedAgents.map((agent) => String(agent.id));
+}
+
+/** Switches every gated agent back on. Safe to call any number of times. */
+export function releaseAgentGate(store = agentStore) {
+    const agents = gatedAgents.splice(0);
+    for (const agent of agents) {
+        store?.setAgentEnabledForScope(agent, true);
+    }
+    return agents.length;
+}
+
 // ---------------------------------------------------------------- selection transforms
 
 export async function runTransform({ kind, instruction = '', value, start, end, signal }) {

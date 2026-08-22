@@ -30,13 +30,17 @@ const LEGACY_LENGTH_HINT = 'two to four paragraphs';
 
 export const DEFAULT_SETTINGS = Object.freeze({
     defaultOn: false,
-    tint: true,
+    /** Optional shade on the model's text. Off: the text sits on the theme's own chat background. */
+    shading: false,
     serif: false,
     rules: DEFAULT_RULES,
     lengthHint: 'about a paragraph',
     /** Hard cap on a continuation's reply, like NovelAI's output length; 0 = the preset's response length. */
     maxTokens: 160,
     transformsUseFullContext: false,
+    /** When on, only the In-Chat Agents listed in allowedAgents run while Story Mode is on. */
+    agentGate: false,
+    allowedAgents: Object.freeze([]),
 });
 
 function nonEmptyText(value, fallback) {
@@ -55,12 +59,14 @@ export function normalizeSettings(raw) {
     const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     return {
         defaultOn: source.defaultOn === true,
-        tint: source.tint !== false,
+        shading: source.shading === true,
         serif: source.serif === true,
         rules: nonEmptyText(source.rules === LEGACY_RULES ? '' : source.rules, DEFAULT_SETTINGS.rules),
         lengthHint: nonEmptyText(source.lengthHint === LEGACY_LENGTH_HINT ? '' : source.lengthHint, DEFAULT_SETTINGS.lengthHint),
         maxTokens: tokenCap(source.maxTokens, DEFAULT_SETTINGS.maxTokens),
         transformsUseFullContext: source.transformsUseFullContext === true,
+        agentGate: source.agentGate === true,
+        allowedAgents: Array.isArray(source.allowedAgents) ? [...new Set(source.allowedAgents.filter((id) => typeof id === 'string' && id))] : [],
     };
 }
 

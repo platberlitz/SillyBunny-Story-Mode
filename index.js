@@ -89,6 +89,7 @@ function apply({ renderDrawer = true } = {}) {
         api.clearRules();
         api.clearDirection();
     }
+    api.applyAgentGate();
     ui.applyState(enabled);
     if (renderDrawer) {
         ui.renderDrawer();
@@ -221,6 +222,14 @@ function start() {
         subscribe(context, events.GENERATION_STARTED, api.onGenerationStarted);
         subscribe(context, events.GENERATION_ENDED, api.refreshBusy);
         subscribe(context, events.GENERATION_STOPPED, api.refreshBusy);
+        // Agents gate: re-assert before every generation (the user may have flipped an agent in the Agents tab).
+        subscribe(context, events.GENERATION_STARTED, (_type, _options, dryRun) => { if (!dryRun) api.applyAgentGate(); });
+        void api.loadAgentStore().then((store) => {
+            if (active && store) {
+                api.applyAgentGate();
+                ui.renderDrawer();
+            }
+        });
         for (const name of ['MORE_MESSAGES_LOADED', 'CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED']) {
             subscribe(context, events[name], scheduleStamp);
         }
@@ -250,6 +259,7 @@ async function stop() {
     busyObserver = null;
     cancelAnimationFrame(stampFrame);
     try {
+        api.releaseAgentGate();
         if (!api.isInflight()) {
             api.clearRules();
             api.clearDirection();

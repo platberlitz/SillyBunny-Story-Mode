@@ -55,12 +55,12 @@ function use(options) {
 }
 
 test('settings are normalised, written back and merged on update', () => {
-    const { context } = use({ extensionSettings: { [SETTINGS_KEY]: { tint: false } } });
-    assert.equal(api.getSettings().tint, false);
+    const { context } = use({ extensionSettings: { [SETTINGS_KEY]: { shading: true } } });
+    assert.equal(api.getSettings().shading, true);
     assert.equal(context.extensionSettings[SETTINGS_KEY].rules.length > 10, true);
     api.updateSettings({ serif: true });
     assert.equal(context.extensionSettings[SETTINGS_KEY].serif, true);
-    assert.equal(context.extensionSettings[SETTINGS_KEY].tint, false);
+    assert.equal(context.extensionSettings[SETTINGS_KEY].shading, true);
 });
 
 test('the per-chat flag wins over the card default and is saved immediately', async () => {
@@ -175,6 +175,39 @@ test('a continuation caps the reply length through the settings-ready events, th
     context.onGenerate = async () => { seen = { hooked: (context.eventSource.handlers.ccsr ?? []).length }; };
     await api.continueStory({ hasText: false });
     assert.deepEqual(seen, { hooked: 0 });
+});
+
+test('the agents gate switches only the non-allowed agents off, only in a Story Mode chat, and back on afterwards', async () => {
+    const { context } = use({ chat: [{ is_user: false, mes: 'Start' }], chatMetadata: { [CHAT_KEY]: { enabled: true } }, extensionSettings: { [SETTINGS_KEY]: { agentGate: true, allowedAgents: ['keep'] } } });
+    const agents = [{ id: 'keep', name: 'Keep', enabled: true }, { id: 'drop', name: 'Drop', enabled: true }, { id: 'off', name: 'Off', enabled: false }];
+    const store = {
+        getAgents: () => [...agents],
+        getEnabledAgents: () => agents.filter((agent) => agent.enabled),
+        setAgentEnabledForScope(agent, enabled) { agent.enabled = enabled; },
+    };
+    assert.deepEqual(api.listAgents(store).map((agent) => `${agent.name}:${agent.enabled}`), ['Keep:true', 'Drop:true', 'Off:false']);
+    assert.deepEqual(api.applyAgentGate(store), ['drop']);
+    assert.deepEqual(agents.map((agent) => agent.enabled), [true, false, false]);
+    assert.deepEqual(api.applyAgentGate(store), ['drop'], 'applying again keeps the same hold');
+    api.updateSettings({ allowedAgents: ['keep', 'drop'] });
+    assert.deepEqual(api.applyAgentGate(store), [], 'a newly allowed agent is released');
+    assert.deepEqual(agents.map((agent) => agent.enabled), [true, true, false]);
+    api.updateSettings({ allowedAgents: ['keep'] });
+    assert.deepEqual(api.applyAgentGate(store), ['drop']);
+
+    context.chatMetadata[CHAT_KEY].enabled = false;
+    assert.deepEqual(api.applyAgentGate(store), [], 'Story Mode off in the chat releases the hold');
+    assert.deepEqual(agents.map((agent) => agent.enabled), [true, true, false], 'only what the gate switched off comes back');
+    context.chatMetadata[CHAT_KEY].enabled = true;
+    assert.deepEqual(api.applyAgentGate(store), ['drop']);
+    api.updateSettings({ agentGate: false });
+    assert.deepEqual(api.applyAgentGate(store), [], 'the setting off releases the hold');
+    api.updateSettings({ agentGate: true });
+    api.applyAgentGate(store);
+    assert.equal(api.releaseAgentGate(store), 1);
+    assert.deepEqual(agents.map((agent) => agent.enabled), [true, true, false]);
+    assert.equal(api.releaseAgentGate(store), 0);
+    assert.equal(api.listAgents(null), null);
 });
 
 test('Story continuation pauses host Auto-continue and restores it afterwards', async () => {

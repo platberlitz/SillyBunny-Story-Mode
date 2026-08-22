@@ -29,9 +29,11 @@ Each continuation is cut off at a token limit (160 by default), the way NovelAI'
 
 **Rewrite a selection.** While a paragraph is open for editing, select some text and a small row appears under the box: Rewrite, Expand, Compress, Custom... It stays on screen while you scroll a long paragraph. The result replaces the selection and stays selected, so you can run another pass on it straight away; nothing is saved until you close the editor, unless SillyBunny's message-edit auto-save setting is on. The row confirms when the browser added it to Ctrl+Z history. By default the model only sees the selection and a couple of paragraphs either side, which is cheap and quick; there's a setting to send the whole story if you'd rather it matched the voice better.
 
+**Agents.** The bundled In-Chat Agents keep working in Story Mode because they read the chat like anything else. If you only want some of them in a story (say, Plot Compass and Continuity but not the trackers that write into the text), tick 'Only the agents ticked below run while Story Mode is on' in the settings and choose them. While a Story Mode chat is open the others are held off (they show as off in the Agents tab for that time); nothing about them is saved, and they come back the moment Story Mode is off in that chat or you switch to another one. Story Mode's continuations count as 'continue' generations to the agents, so an agent only fires on them if its own trigger list includes Continue (Direction Menu, for one, ships with Normal only).
+
 **Room to read.** On a desktop the manuscript uses more of the screen than a chat does: while Story Mode is on the chat column grows to about 58em unless your Chat Width setting is already wider, and the text itself stays under about 50em per line.
 
-**Shading.** Text the model wrote gets a faint shade; yours doesn't. When the model finishes a paragraph you started, only its part is shaded. Editing a block resets that block to plain. Turn shading off in the settings if it annoys you.
+**Background.** The manuscript sits directly on your theme's chat background: Story Mode clears the message boxes, including the per-message tint that the Echo, Whisper, Hush, Ripple and Tide chat styles paint behind the text. If you want to see who wrote what, turn on 'Shade the model's text' in the settings: text the model wrote gets a faint shade, yours doesn't, and when the model finishes a paragraph you started only its part is shaded. Editing a block resets that block to plain.
 
 ## What the model actually sees
 
@@ -71,7 +73,7 @@ For an ensemble, put a 'Narrator' card (world and style) and one card per lead i
 
 ## Settings
 
-Customize › Extensions › Story Mode: the per-chat switch, the start-in-Story-Mode default, the open card's own switch and rules, shading, serif font, the rules text (with a reset), the length hint, the token limit per continuation, and whether rewrites see the whole story.
+Customize › Extensions › Story Mode: the per-chat switch, the start-in-Story-Mode default, the open card's own switch and rules, shading (off by default), serif font, the rules text (with a reset), the length hint, the token limit per continuation, which In-Chat Agents may run while Story Mode is on, and whether rewrites see the whole story.
 
 ## Development
 

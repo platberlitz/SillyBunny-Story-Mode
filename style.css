@@ -113,16 +113,23 @@ body.sbstory #chat .mes:not(.smallSysMes) .ch_name {
     max-width: 100%;
     flex-wrap: wrap;
     background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
     justify-content: flex-end;
 }
 
-body.sbstory #chat .mes:not(.smallSysMes) .mes_text {
+/* The text sits directly on the theme's chat background: the Echo/Whisper/... chat styles paint
+   .mes_text with the message tint (!important, specificity 1,4,1), so this rule outranks them. */
+body.sbstory #chat .mes:not(.smallSysMes):not(.displayNone) .mes_text {
     padding: 0 !important;
     margin: 0 !important;
     width: auto !important;
     max-width: 100% !important;
     min-height: 0 !important;
     float: none !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
     font-size: var(--mainFontSize);
     line-height: 1.6;
     cursor: text;
@@ -144,15 +151,15 @@ body.sbstory.sbstory-serif #chat .mes .edit_textarea {
     font-family: Georgia, 'Noto Serif', 'Times New Roman', serif !important;
 }
 
-/* Shading for the model's text: whole blocks it wrote, and the tail it added to one of yours. */
-body.sbstory:not(.sbstory-notint) #chat .mes[data-sbstory-origin="model"]:not(.smallSysMes) .mes_text {
-    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 10%, transparent);
+/* Optional shading for the model's text (off by default): whole blocks it wrote, and the tail it added to one of yours. */
+body.sbstory.sbstory-shade #chat .mes[data-sbstory-origin="model"]:not(.smallSysMes):not(.displayNone) .mes_text {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 10%, transparent) !important;
     border-radius: 6px;
     padding-inline: 6px !important;
     margin-inline: -6px !important;
 }
 
-body.sbstory:not(.sbstory-notint) #chat .mes .mes_text .sbstory-model {
+body.sbstory.sbstory-shade #chat .mes .mes_text .sbstory-model {
     background: color-mix(in srgb, var(--SmartThemeQuoteColor) 12%, transparent);
     border-radius: 3px;
     -webkit-box-decoration-break: clone;
@@ -268,6 +275,7 @@ body.sbstory #chat .mes .edit_textarea:focus-visible {
 
 #sbstory-settings .sbstory-reset {
     align-self: flex-start;
+    white-space: nowrap;
 }
 
 /* ---------------------------------------------------------------- wand entry */
