@@ -30,13 +30,6 @@
     pointer-events: none;
 }
 
-#sbstory-bar .sbstory-words {
-    margin-left: auto;
-    font-size: calc(var(--mainFontSize) * 0.8);
-    opacity: 0.7;
-    white-space: nowrap;
-}
-
 #sbstory-bar .sbstory-direction-wrap {
     flex-basis: 100%;
     display: flex;
@@ -53,7 +46,7 @@
 
 /* ---------------------------------------------------------------- the manuscript */
 
-body.sbstory #chat .mes:not(.smallSysMes) {
+body.sbstory #chat .mes:not(.smallSysMes):not(.displayNone):not([hidden]) {
     display: block !important;
     grid-template-columns: none !important;
     max-width: min(72ch, 100%);
@@ -63,7 +56,6 @@ body.sbstory #chat .mes:not(.smallSysMes) {
     border: 0 !important;
     border-radius: 0 !important;
     box-shadow: none !important;
-    contain: none;
 }
 
 body.sbstory #chat .mes:not(.smallSysMes)::before,
@@ -83,6 +75,7 @@ body.sbstory #chat .mes:not(.smallSysMes):not(.last_mes) .swipeRightBlock {
 }
 
 body.sbstory #chat .mes:not(.smallSysMes) .mes_block {
+    display: flow-root !important;
     margin: 0 !important;
     padding: 0 !important;
     transform: none !important;
@@ -93,16 +86,17 @@ body.sbstory #chat .mes:not(.smallSysMes) .mes_block {
     background: transparent !important;
 }
 
-/* Message buttons live inside .ch_name; park them top-right so they take no vertical room. */
+/* Float message controls beside the opening line instead of covering manuscript text. */
 body.sbstory #chat .mes:not(.smallSysMes) .ch_name {
-    position: absolute;
-    top: -2px;
-    right: 8px;
+    position: relative;
+    float: right;
     z-index: 1;
     margin: 0 !important;
     padding: 0 !important;
     min-height: 0 !important;
     width: auto !important;
+    max-width: 100%;
+    flex-wrap: wrap;
     background: transparent !important;
     justify-content: flex-end;
     opacity: 0.35;
@@ -117,7 +111,7 @@ body.sbstory #chat .mes:not(.smallSysMes):has(.edit_textarea) .ch_name {
 
 @media (hover: none) {
     body.sbstory #chat .mes:not(.smallSysMes) .ch_name {
-        opacity: 0.55;
+        opacity: 1;
     }
 }
 
@@ -189,6 +183,11 @@ body.sbstory #chat .mes:has(.edit_textarea) {
     border-radius: 8px !important;
 }
 
+body.sbstory #chat .mes:has(.edit_textarea) .ch_name {
+    float: none;
+    width: 100% !important;
+}
+
 body.sbstory #chat .mes .edit_textarea {
     background: transparent !important;
     border: 0 !important;
@@ -222,6 +221,10 @@ body.sbstory #chat .mes .edit_textarea:focus-visible {
     display: none;
 }
 
+.sbstory-transforms .sbstory-stop[hidden] {
+    display: none;
+}
+
 .sbstory-transforms .sbstory-tbtn {
     display: inline-flex;
     align-items: center;
@@ -241,6 +244,23 @@ body.sbstory #chat .mes .edit_textarea:focus-visible {
 }
 
 /* ---------------------------------------------------------------- settings drawer */
+
+#sbstory-settings > .inline-drawer-toggle {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+}
+
+#sbstory-settings .sbstory-drawer-icon {
+    transition: transform var(--animation-duration, 125ms);
+}
+
+#sbstory-settings > .inline-drawer-toggle[aria-expanded="true"] .sbstory-drawer-icon {
+    transform: rotate(180deg);
+}
 
 #sbstory-settings .sbstory-row {
     display: flex;

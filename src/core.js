@@ -3,11 +3,10 @@
  * so every function is exercised by test/core.test.js.
  */
 
-export const MODULE_NAME = 'SillyBunny-Story-Mode';
 export const SETTINGS_KEY = 'SillyBunny-Story-Mode';
 /** chat_metadata key: { enabled } */
 export const CHAT_KEY = 'story_mode';
-/** message.extra key: { cuts: number[] } */
+/** message.extra key: { cuts: number[], revision: string } */
 export const EXTRA_KEY = 'story_mode';
 /** character.data.extensions key: { default, instruction } */
 export const CARD_KEY = 'story_mode';
@@ -22,7 +21,6 @@ export const DEFAULT_RULES = '[Story Mode: you and {{user}} are co-writing one c
     + 'Write {{length}}, then stop at a natural beat.]';
 
 export const DEFAULT_SETTINGS = Object.freeze({
-    version: 1,
     defaultOn: false,
     tint: true,
     serif: false,
@@ -38,7 +36,6 @@ function nonEmptyText(value, fallback) {
 export function normalizeSettings(raw) {
     const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
     return {
-        version: DEFAULT_SETTINGS.version,
         defaultOn: source.defaultOn === true,
         tint: source.tint !== false,
         serif: source.serif === true,
@@ -78,9 +75,36 @@ export function endsMidSentence(text) {
     return !TERMINAL.test(stripped);
 }
 
-export function getCuts(message) {
-    const cuts = message?.extra?.[EXTRA_KEY]?.cuts;
-    return Array.isArray(cuts) ? cuts.filter((n) => Number.isInteger(n) && n >= 0) : [];
+/** Compact full-text revision used to ensure a saved cut still belongs to the current text. */
+export function textRevision(text) {
+    const value = String(text ?? '');
+    let h1 = 0xdeadbeef;
+    let h2 = 0x41c6ce57;
+    for (let i = 0; i < value.length; i++) {
+        const char = value.charCodeAt(i);
+        h1 = Math.imul(h1 ^ char, 2654435761);
+        h2 = Math.imul(h2 ^ char, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return `${value.length}:${4294967296 * (2097151 & h2) + (h1 >>> 0)}`;
+}
+
+export function getCuts(message, { ignoreRevision = false } = {}) {
+    const state = message?.extra?.[EXTRA_KEY];
+    const cuts = state?.cuts;
+    const text = String(message?.mes ?? '');
+    if (!Array.isArray(cuts) || (!ignoreRevision && state.revision !== textRevision(text))) {
+        return [];
+    }
+    let previous = -1;
+    for (const cut of cuts) {
+        if (!Number.isInteger(cut) || cut < 0 || cut > text.length || cut <= previous) {
+            return [];
+        }
+        previous = cut;
+    }
+    return [...cuts];
 }
 
 /** Who wrote a block: the model, the user, or the user with the model's continuation appended. */
@@ -197,23 +221,6 @@ export function cleanTransformResult(text, selection = '') {
         }
     }
     return out;
-}
-
-export function wordCount(chat) {
-    if (!Array.isArray(chat)) {
-        return 0;
-    }
-    let total = 0;
-    for (const message of chat) {
-        if (!message || message.is_system) {
-            continue;
-        }
-        const words = String(message.mes ?? '').match(/\S+/gu);
-        if (words) {
-            total += words.length;
-        }
-    }
-    return total;
 }
 
 /** `/story on|off|toggle` → true/false; null for junk. */

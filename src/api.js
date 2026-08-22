@@ -17,6 +17,7 @@ import {
     getCuts,
     normalizeSettings,
     resolveEnabled,
+    textRevision,
 } from './core.js';
 
 /** extension_prompt_types.IN_CHAT / extension_prompt_roles.SYSTEM */
@@ -66,7 +67,7 @@ export function getChatFlag() {
     return typeof value === 'boolean' ? value : undefined;
 }
 
-export function setChatFlag(enabled) {
+export async function setChatFlag(enabled) {
     const context = ctx();
     const meta = context.chatMetadata;
     if (!meta) {
@@ -74,7 +75,7 @@ export function setChatFlag(enabled) {
     }
     const current = meta[CHAT_KEY] && typeof meta[CHAT_KEY] === 'object' ? meta[CHAT_KEY] : {};
     meta[CHAT_KEY] = { ...current, enabled: Boolean(enabled) };
-    context.saveMetadataDebounced?.();
+    await context.saveMetadata();
     return true;
 }
 
@@ -102,24 +103,34 @@ export function getCardConfig() {
     };
 }
 
+let cardWrite = Promise.resolve();
+
 /**
  * The host persists card fields with a merge, so a key can only be cleared by
  * writing an explicit empty value: `default: null` means "no preference".
  */
 export async function setCardConfig(patch) {
     const context = ctx();
-    const character = currentCharacter();
+    const character = context.groupId ? null : context.characters?.[context.characterId];
     if (!character) {
         return false;
     }
-    const current = getCardConfig() ?? { default: undefined, instruction: '' };
-    const merged = { ...current, ...patch };
-    const next = {
-        default: merged.default === true ? true : null,
-        instruction: typeof merged.instruction === 'string' ? merged.instruction.trim() : '',
-    };
-    await context.writeExtensionField(context.characterId, CARD_KEY, next);
-    return true;
+    const characterId = context.characterId;
+    const write = cardWrite.catch(() => {}).then(async () => {
+        const stored = character.data?.extensions?.[CARD_KEY];
+        const current = stored && typeof stored === 'object'
+            ? { default: typeof stored.default === 'boolean' ? stored.default : undefined, instruction: typeof stored.instruction === 'string' ? stored.instruction : '' }
+            : { default: undefined, instruction: '' };
+        const merged = { ...current, ...patch };
+        const next = {
+            default: typeof merged.default === 'boolean' ? merged.default : null,
+            instruction: typeof merged.instruction === 'string' ? merged.instruction.trim() : '',
+        };
+        await context.writeExtensionField(characterId, CARD_KEY, next);
+        return true;
+    });
+    cardWrite = write;
+    return write;
 }
 
 export function isEnabled() {
@@ -178,28 +189,63 @@ function storyExtra(message) {
     return message.extra[EXTRA_KEY];
 }
 
-export function pushCut(index) {
-    const message = messageAt(index);
+function chatIdentity(context = ctx()) {
+    return context.groupId
+        ? `group:${context.groupId}:${context.chatId ?? ''}`
+        : `character:${context.characterId ?? ''}:${context.chatId ?? ''}`;
+}
+
+function captureChat() {
+    const context = ctx();
+    return { context, chat: context.chat, key: chatIdentity(context) };
+}
+
+function isCurrentChat(action) {
+    const context = ctx();
+    return chatIdentity(context) === action.key && context.chat === action.chat;
+}
+
+function pushMessageCut(message) {
     if (!message) {
         return null;
     }
     const cut = String(message.mes ?? '').length;
-    storyExtra(message).cuts = [...getCuts(message), cut];
+    const cuts = getCuts(message);
+    if (cuts.at(-1) !== cut) {
+        setCuts(message, [...cuts, cut]);
+    }
     return cut;
+}
+
+export function pushCut(index) {
+    return pushMessageCut(messageAt(index));
 }
 
 export function dropCuts(index) {
     const message = messageAt(index);
-    if (message?.extra && typeof message.extra === 'object') {
-        delete message.extra[EXTRA_KEY];
+    if (message) {
+        setCuts(message, []);
     }
 }
 
 function setCuts(message, cuts) {
+    let state = null;
     if (cuts.length) {
-        storyExtra(message).cuts = cuts;
+        state = { cuts: [...cuts], revision: textRevision(message.mes) };
+        Object.assign(storyExtra(message), state);
     } else if (message.extra && typeof message.extra === 'object') {
         delete message.extra[EXTRA_KEY];
+    }
+    const swipeInfo = Array.isArray(message.swipe_info) && typeof message.swipe_id === 'number'
+        ? message.swipe_info[message.swipe_id]
+        : null;
+    if (swipeInfo && typeof swipeInfo === 'object') {
+        swipeInfo.extra ??= {};
+        if (state) {
+            swipeInfo.extra[EXTRA_KEY] = structuredClone(state);
+        } else {
+            delete swipeInfo.extra[EXTRA_KEY];
+        }
     }
 }
 
@@ -210,17 +256,21 @@ function syncSwipe(message) {
     }
 }
 
-/** A continuation that produced nothing leaves a cut at the end of the text; drop it. */
-function pruneEmptyCut(index) {
-    const message = messageAt(index);
-    if (!message) {
-        return;
+/** Seal generated text to its cuts, pruning an empty continuation before persistence. */
+function sealCuts(message) {
+    if (!message?.extra?.[EXTRA_KEY]) {
+        return false;
     }
-    const cuts = getCuts(message);
+    const cuts = getCuts(message, { ignoreRevision: true });
     if (cuts.length && cuts[cuts.length - 1] >= String(message.mes ?? '').length) {
         cuts.pop();
-        setCuts(message, cuts);
     }
+    setCuts(message, cuts);
+    return true;
+}
+
+function hasCutMetadata(message) {
+    return Boolean(message?.extra && typeof message.extra === 'object' && Object.hasOwn(message.extra, EXTRA_KEY));
 }
 
 // ---------------------------------------------------------------- edit snapshots
@@ -241,106 +291,149 @@ export function onMessageEdited(index) {
     editSnapshots.delete(id);
     const message = messageAt(id);
     if (!message) {
-        return;
+        return false;
     }
     if (snapshot !== undefined && snapshot === String(message.mes ?? '')) {
-        return;
+        return false;
     }
     dropCuts(id);
+    return true;
 }
 
 // ---------------------------------------------------------------- generation lifecycle
 
-const inflight = { requested: false, armed: false, expectCut: false, mesid: -1 };
-const hooks = { afterGeneration: null };
+let inflight = null;
+let hostBusy = false;
+let ignoredGenerationEnds = 0;
+const hooks = { beforeGeneration: null, afterGeneration: null, busyChanged: null };
 
 export function setHooks(partial) {
     Object.assign(hooks, partial);
 }
 
 export function isInflight() {
-    return inflight.requested || inflight.armed;
+    return inflight !== null;
 }
 
 export function resetInflight() {
-    inflight.requested = false;
-    inflight.armed = false;
-    inflight.expectCut = false;
-    inflight.mesid = -1;
+    inflight = null;
+    resetHostBusy();
 }
 
-/** GENERATION_STARTED (type, params, dryRun): only our own continue arms the lifecycle. */
-export function onGenerationStarted(type, _params, dryRun) {
-    if (!inflight.requested || dryRun || type !== 'continue') {
+export function resetHostBusy() {
+    hostBusy = false;
+    ignoredGenerationEnds = 0;
+    hooks.busyChanged?.(isBusy());
+}
+
+export function onGenerationStarted(type, _options, dryRun = false) {
+    if (dryRun) {
         return;
     }
-    inflight.armed = true;
+    if (type === 'quiet') {
+        ignoredGenerationEnds++;
+        return;
+    }
+    hostBusy = true;
+    if (!inflight) {
+        clearRedo();
+    }
+    hooks.busyChanged?.(isBusy());
+}
+
+export function onGenerationFinished() {
+    if (ignoredGenerationEnds > 0) {
+        ignoredGenerationEnds--;
+        return;
+    }
+    hostBusy = false;
+    hooks.busyChanged?.(isBusy());
 }
 
 /** MESSAGE_SENT: the host just added the composer text as a user block; record where the model's text will start. */
 export function onMessageSent(index) {
-    if (!inflight.requested || !inflight.expectCut) {
+    const action = inflight;
+    if (!action?.expectCut || !isCurrentChat(action)) {
         return;
     }
-    const id = Number.isInteger(Number(index)) && messageAt(Number(index)) ? Number(index) : lastIndex();
-    inflight.expectCut = false;
-    inflight.mesid = id;
-    pushCut(id);
+    const candidate = Number(index);
+    const id = Number.isInteger(candidate) && action.chat?.[candidate] ? candidate : action.chat.length - 1;
+    const message = action.chat?.[id];
+    if (id !== action.expectedIndex || !message?.is_user) {
+        return;
+    }
+    action.expectCut = false;
+    action.mesid = id;
+    action.message = message;
+    pushMessageCut(message);
 }
 
-export function onGenerationEnded() {
-    if (!inflight.armed) {
-        return;
+async function finalize(action) {
+    try {
+        if (inflight === action && isCurrentChat(action) && action.chat[action.mesid] === action.message && sealCuts(action.message)) {
+            await action.context.saveChat();
+        }
+    } finally {
+        if (inflight === action) {
+            inflight = null;
+            clearDirection();
+        }
+        hooks.afterGeneration?.(action);
     }
-    finalize();
-}
-
-function finalize() {
-    if (!inflight.requested && !inflight.armed) {
-        return;
-    }
-    const mesid = inflight.mesid;
-    resetInflight();
-    if (mesid >= 0) {
-        pruneEmptyCut(mesid);
-    }
-    clearDirection();
-    hooks.afterGeneration?.();
 }
 
 export async function finishOpenEdit() {
     if (typeof document === 'undefined') {
-        return;
+        return true;
     }
     const textarea = document.getElementById('curEditTextarea');
     const done = textarea?.closest('.mes')?.querySelector('.mes_edit_done');
     if (!textarea || !done) {
-        return;
+        return true;
     }
     done.click();
     const deadline = Date.now() + 2000;
     while (document.getElementById('curEditTextarea') && Date.now() < deadline) {
         await new Promise((resolve) => setTimeout(resolve, 25));
     }
+    const closed = !document.getElementById('curEditTextarea');
+    if (!closed) {
+        toast('info', 'Finish the open edit before changing the story.');
+    }
+    return closed;
 }
 
 // A synchronous lock so two quick taps on Continue/Retry/Undo/Redo cannot both start.
 let busy = false;
 
 export function isBusy() {
-    return busy;
+    const hostControls = typeof document !== 'undefined'
+        && document.getElementById?.('send_form')?.classList?.contains('sb-generating-controls');
+    return busy || hostBusy || Boolean(hostControls);
 }
 
 async function locked(action) {
-    if (busy) {
+    if (isBusy()) {
         return false;
     }
     busy = true;
+    hooks.busyChanged?.(true);
     try {
         return await action();
     } finally {
         busy = false;
+        hooks.busyChanged?.(isBusy());
     }
+}
+
+function composerHasText(fallback) {
+    if (typeof document !== 'undefined') {
+        const textarea = document.getElementById?.('send_textarea');
+        if (textarea) {
+            return String(textarea.value ?? '').length > 0;
+        }
+    }
+    return Boolean(fallback);
 }
 
 /**
@@ -348,31 +441,61 @@ async function locked(action) {
  * user's block first (Generate consumes the textarea for type 'continue') and
  * then continues that block; with an empty composer it extends the last block.
  */
-async function continueUnlocked({ hasText = false } = {}) {
+async function continueUnlocked({ hasText: hasTextHint = false, direction = '', preserveRedo = false } = {}) {
     if (isInflight()) {
         return false;
     }
-    inflight.requested = true;
+    const action = { ...captureChat(), direction, expectCut: false, expectedIndex: -1, mesid: -1, message: null };
+    inflight = action;
     let started = false;
     try {
-        await finishOpenEdit();
-        const context = ctx();
-        const last = lastIndex();
+        if (!await finishOpenEdit() || !isCurrentChat(action)) {
+            return false;
+        }
+        const { context, chat } = action;
+        const hasText = composerHasText(hasTextHint);
+        const last = chat.length - 1;
         if (last < 0 && !hasText) {
             toast('info', 'Write something first, then continue.');
+            return false;
+        }
+        if (hasText && context.groupId) {
+            toast('info', 'Send that text first in group chats, then use Continue.');
             return false;
         }
         if (!hasText && context.chat[last]?.is_system) {
             toast('info', 'The last block is hidden from the model. Unhide it or write something first.');
             return false;
         }
-        inflight.expectCut = hasText;
-        inflight.mesid = hasText ? -1 : last;
+        if (!preserveRedo) {
+            clearRedo();
+        }
+        action.expectCut = hasText;
+        action.expectedIndex = hasText ? chat.length : -1;
+        action.mesid = hasText ? -1 : last;
+        if (direction) {
+            setDirection(direction);
+        } else {
+            clearDirection();
+        }
         if (!hasText) {
-            pushCut(last);
+            action.message = chat[last];
+            pushMessageCut(action.message);
         }
         started = true;
-        await context.generate('continue');
+        hooks.beforeGeneration?.();
+        const autoContinue = context.powerUserSettings?.auto_continue;
+        const restoreAutoContinue = autoContinue?.enabled === true;
+        if (restoreAutoContinue) {
+            autoContinue.enabled = false;
+        }
+        try {
+            await context.generate('continue');
+        } finally {
+            if (restoreAutoContinue && autoContinue.enabled === false) {
+                autoContinue.enabled = true;
+            }
+        }
         return true;
     } catch (error) {
         console.error('[Story Mode] continue failed', error);
@@ -380,9 +503,9 @@ async function continueUnlocked({ hasText = false } = {}) {
         return true;
     } finally {
         if (started) {
-            finalize();
-        } else {
-            resetInflight();
+            await finalize(action);
+        } else if (inflight === action) {
+            inflight = null;
         }
     }
 }
@@ -395,8 +518,7 @@ export function continueStory(options) {
 
 const redoByChat = new Map();
 
-function redoStack() {
-    const key = String(ctx().chatId ?? '');
+function redoStack(key = chatIdentity()) {
     if (!redoByChat.has(key)) {
         redoByChat.set(key, []);
     }
@@ -411,10 +533,41 @@ export function canRedo() {
     return redoStack().length > 0;
 }
 
-async function truncateLastContinuation() {
+function redoMatches(entry, chat, key) {
+    if (!entry || entry.chat !== chat || entry.chatKey !== key) {
+        return false;
+    }
+    if (entry.kind === 'tail') {
+        const message = chat[entry.mesid];
+        return entry.mesid === chat.length - 1 && String(message?.mes ?? '') === entry.prefix;
+    }
+    if (entry.kind === 'message') {
+        const previous = chat.at(-1);
+        return entry.previous === null
+            ? chat.length === 0
+            : chat.length === entry.index
+                && String(previous?.mes ?? '') === entry.previous.text
+                && Boolean(previous?.is_user) === entry.previous.isUser
+                && Boolean(previous?.is_system) === entry.previous.isSystem;
+    }
+    return false;
+}
+
+export function clearRedoIfDiverged() {
     const context = ctx();
-    const index = lastIndex();
-    const message = messageAt(index);
+    const key = chatIdentity(context);
+    const stack = redoByChat.get(key);
+    if (stack?.length && !redoMatches(stack.at(-1), context.chat, key)) {
+        redoByChat.delete(key);
+        return true;
+    }
+    return false;
+}
+
+async function truncateLastContinuation(action) {
+    const { context, chat } = action;
+    const index = chat.length - 1;
+    const message = chat[index];
     if (!message) {
         return null;
     }
@@ -424,40 +577,62 @@ async function truncateLastContinuation() {
     }
     const cut = cuts.pop();
     const text = String(message.mes ?? '');
+    if (cut >= text.length) {
+        return null;
+    }
     const tail = text.slice(cut);
     message.mes = text.slice(0, cut);
     syncSwipe(message);
     setCuts(message, cuts);
-    await context.updateMessageBlock(index, message);
-    await context.saveChat();
-    return { mesid: index, cut, tail };
+    const saving = context.saveChat();
+    if (isCurrentChat(action)) {
+        await context.updateMessageBlock(index, message);
+    }
+    await saving;
+    return { mesid: index, cut, tail, prefix: message.mes };
 }
 
 export function undo() {
     return locked(async () => {
-        const context = ctx();
         if (isInflight()) {
             return false;
         }
-        await finishOpenEdit();
-        const index = lastIndex();
-        const message = messageAt(index);
+        const action = captureChat();
+        if (!await finishOpenEdit() || !isCurrentChat(action)) {
+            return false;
+        }
+        const { context, chat } = action;
+        const index = chat.length - 1;
+        const message = chat[index];
         if (!message) {
             return false;
         }
         if (getCuts(message).length) {
-            const removed = await truncateLastContinuation();
+            const removed = await truncateLastContinuation(action);
             if (removed) {
-                redoStack().push({ kind: 'tail', ...removed });
+                redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
             }
             return true;
         }
-        if (!message.is_user) {
+        if (hasCutMetadata(message)) {
+            toast('info', 'This block changed since its continuation was recorded, so it cannot be undone safely.');
+            return false;
+        }
+        if (!message.is_user && !message.is_system) {
             const copy = structuredClone(message);
-            await context.deleteLastMessage();
-            await context.saveChat();
-            context.swipe?.refresh?.();
-            redoStack().push({ kind: 'message', message: copy });
+            const previous = index > 0 ? {
+                text: String(chat[index - 1]?.mes ?? ''),
+                isUser: Boolean(chat[index - 1]?.is_user),
+                isSystem: Boolean(chat[index - 1]?.is_system),
+            } : null;
+            const deleting = context.deleteLastMessage();
+            const saving = context.saveChat({ allowShrink: true });
+            await deleting;
+            await saving;
+            if (isCurrentChat(action)) {
+                context.swipe?.refresh?.();
+            }
+            redoStack(action.key).push({ kind: 'message', chat: action.chat, chatKey: action.key, index, previous, message: copy });
             return true;
         }
         toast('info', 'Nothing to undo: the last block is yours. Tap it to edit.');
@@ -467,32 +642,47 @@ export function undo() {
 
 export function redo() {
     return locked(async () => {
-        const context = ctx();
         if (isInflight()) {
             return false;
         }
-        const entry = redoStack().pop();
+        const action = captureChat();
+        if (!await finishOpenEdit() || !isCurrentChat(action)) {
+            return false;
+        }
+        const { context, chat } = action;
+        const entry = redoStack(action.key).pop();
         if (!entry) {
             return false;
         }
         if (entry.kind === 'tail') {
-            const message = messageAt(entry.mesid);
-            if (!message || entry.mesid !== lastIndex() || String(message.mes ?? '').length !== entry.cut) {
+            const message = chat[entry.mesid];
+            if (!redoMatches(entry, chat, action.key) || !message) {
                 toast('info', 'That block changed since the undo, so there is nothing safe to put back.');
                 return false;
             }
-            storyExtra(message).cuts = [...getCuts(message), entry.cut];
+            const cuts = getCuts(message);
             message.mes = String(message.mes ?? '') + entry.tail;
             syncSwipe(message);
-            await context.updateMessageBlock(entry.mesid, message);
-            await context.saveChat();
+            setCuts(message, [...cuts, entry.cut]);
+            const saving = context.saveChat();
+            if (isCurrentChat(action)) {
+                await context.updateMessageBlock(entry.mesid, message);
+            }
+            await saving;
             return true;
         }
         if (entry.kind === 'message') {
-            context.chat.push(entry.message);
-            context.addOneMessage(entry.message);
-            await context.saveChat();
-            context.swipe?.refresh?.();
+            if (!redoMatches(entry, chat, action.key)) {
+                toast('info', 'The story changed since the undo, so there is nothing safe to put back.');
+                return false;
+            }
+            chat.push(entry.message);
+            const saving = context.saveChat();
+            if (isCurrentChat(action)) {
+                context.addOneMessage(entry.message);
+                context.swipe?.refresh?.();
+            }
+            await saving;
             return true;
         }
         return false;
@@ -501,24 +691,46 @@ export function redo() {
 
 export function retry() {
     return locked(async () => {
-        const context = ctx();
         if (isInflight()) {
             return false;
         }
-        await finishOpenEdit();
-        const index = lastIndex();
-        const message = messageAt(index);
+        const action = captureChat();
+        if (!await finishOpenEdit() || !isCurrentChat(action)) {
+            return false;
+        }
+        const { context, chat } = action;
+        const index = chat.length - 1;
+        const message = chat[index];
         if (!message) {
             return false;
         }
         if (getCuts(message).length) {
-            const removed = await truncateLastContinuation();
-            if (removed) {
-                redoStack().push({ kind: 'tail', ...removed });
+            const removed = await truncateLastContinuation(action);
+            if (!isCurrentChat(action)) {
+                if (removed && String(message.mes ?? '') === removed.prefix) {
+                    redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
+                }
+                return false;
             }
-            return continueUnlocked({ hasText: false });
+            if (!removed) {
+                return false;
+            }
+            const result = await continueUnlocked({ hasText: false, preserveRedo: true });
+            const replacementSucceeded = action.chat[removed.mesid] === message
+                && String(message.mes ?? '').length > removed.prefix.length
+                && getCuts(message).includes(removed.cut);
+            if (replacementSucceeded) {
+                clearRedo();
+            } else if (String(message.mes ?? '') === removed.prefix) {
+                redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
+            }
+            return result;
         }
-        if (!message.is_user) {
+        if (hasCutMetadata(message)) {
+            toast('info', 'This block changed since its continuation was recorded, so it cannot be retried safely.');
+            return false;
+        }
+        if (!message.is_user && !message.is_system) {
             if (context.swipe?.isAllowed?.() === false) {
                 toast('info', 'Swipes are off or a generation is still running.');
                 return false;
@@ -543,7 +755,13 @@ export async function runTransform({ kind, instruction = '', value, start, end, 
     const raw = getSettings().transformsUseFullContext
         ? await context.generateQuietPrompt({ quietPrompt: `${systemPrompt}\n\n${prompt}`, skipWIAN: true, responseLength, signal })
         : await context.generateRaw({ systemPrompt, prompt, responseLength, signal });
-    return cleanTransformResult(raw, window.selection);
+    const result = cleanTransformResult(raw, window.selection);
+    if (!result) {
+        return '';
+    }
+    const leading = window.selection.match(/^\s*/u)?.[0] ?? '';
+    const trailing = window.selection.match(/\s*$/u)?.[0] ?? '';
+    return `${leading}${result}${trailing}`;
 }
 
 // ---------------------------------------------------------------- slash command

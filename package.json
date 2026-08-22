@@ -2,10 +2,15 @@
   "name": "sillybunny-story-mode",
   "version": "0.1.0",
   "private": true,
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/platberlitz/SillyBunny-Story-Mode.git"
+  },
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "lint": "node --check index.js && node --check src/core.js && node --check src/api.js && node --check src/ui.js && node --check test/core.test.js && node --check test/api.test.js"
+    "check": "node --check index.js && node --check src/core.js && node --check src/api.js && node --check src/ui.js && node --check test/core.test.js && node --check test/api.test.js && node --check test/release.test.js"
   },
   "engines": {
     "node": ">=20"

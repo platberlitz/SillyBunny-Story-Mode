@@ -8,7 +8,7 @@ It borrows from [errata](https://github.com/tealios/errata) as well: select a pa
 
 ## Install
 
-1. Put this folder where SillyBunny can see it - `data/<user>/extensions/SillyBunny-Story-Mode` for one user, or `public/scripts/extensions/third-party/SillyBunny-Story-Mode` for everyone. A symlink is fine; that's how I run it.
+1. Install `https://github.com/platberlitz/SillyBunny-Story-Mode` from SillyBunny's extension installer. For a manual install, put this folder in `data/<user>/extensions/SillyBunny-Story-Mode` for one user or `public/scripts/extensions/third-party/SillyBunny-Story-Mode` for everyone.
 2. Reload SillyBunny and make sure Story Mode is enabled under Customize › Extensions.
 
 No build step, no dependencies.
@@ -25,7 +25,7 @@ No build step, no dependencies.
 
 **Edit anything by tapping it.** That's SillyBunny's own message editor, restyled so the box looks like the page. Escape keeps your changes (the host normally throws them away on Escape, which I kept tripping over), and so does the tick.
 
-**Rewrite a selection.** While a paragraph is open for editing, select some text and a small row appears: Rewrite, Expand, Compress, Custom... The result replaces the selection and nothing is saved until you close the editor, so Ctrl+Z inside the box undoes it. By default the model only sees the selection and a couple of paragraphs either side, which is cheap and quick; there's a setting to send the whole story if you'd rather it matched the voice better.
+**Rewrite a selection.** While a paragraph is open for editing, select some text and a small row appears: Rewrite, Expand, Compress, Custom... The result replaces the selection and nothing is saved until you close the editor, unless SillyBunny's message-edit auto-save setting is on. The row confirms when the browser added it to Ctrl+Z history. By default the model only sees the selection and a couple of paragraphs either side, which is cheap and quick; there's a setting to send the whole story if you'd rather it matched the voice better.
 
 **Shading.** Text the model wrote gets a faint shade; yours doesn't. When the model finishes a paragraph you started, only its part is shaded. Editing a block resets that block to plain. Turn shading off in the settings if it annoys you.
 
@@ -59,10 +59,11 @@ For an ensemble, put a 'Narrator' card (world and style) and one card per lead i
 ## Things to know
 
 - Chat completion APIs are the happy path. Text completion backends prefix every block with a name (`Ann:`), which spoils the manuscript illusion; use an instruct template with names off if you go that way.
-- Groups work but I haven't polished them; continuing goes through the host's group handling.
+- Empty-box Continue works in groups. If the composer contains text, send it first; the host does not add composer text during a group continuation, so Story Mode refuses rather than continuing the wrong block.
+- Story Mode pauses the host's Auto-continue setting only while its own request runs, then restores it. One Story Continue stays one undoable passage.
 - The shading of a model tail inside your own paragraph is measured against the rendered text, so markdown that straddles the join can shift it by a few characters. Cosmetic.
 - Rewrites and the custom instruction are one-shot calls with no streaming, and the host's Stop button doesn't reach them; use the Stop in the row.
-- Redo history lives in memory and is forgotten when you switch chats. The cut points themselves are saved with each message, so Undo survives a reload.
+- Redo history lives in memory, is forgotten when you switch chats and is discarded after a divergent edit or generation. Revision-checked cut points are saved with each message, so Undo survives a reload without applying stale offsets to edited text.
 
 ## Settings
 
@@ -72,11 +73,7 @@ Customize › Extensions › Story Mode: the per-chat switch, the start-in-Story
 
 ```
 npm test      # node --test
-npm run lint  # node --check on every file
+npm run check # node --check on every JavaScript file
 ```
 
 `src/core.js` is pure and covered by tests, `src/api.js` is every call into the host, `src/ui.js` is the DOM, `style.css` is the manuscript look gated on `body.sbstory`. The version lives in `manifest.json` and `package.json`.
-
-## Not in this version
-
-errata's planner brief (a second model call that plans before writing), a branching view (SillyBunny has `/branch`), a story-bible panel, text-adventure `> You ...` mode, hotkeys beyond the host's. Ask if you want any of them.

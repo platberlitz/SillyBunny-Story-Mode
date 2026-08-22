@@ -18,8 +18,15 @@ import {
     normalizeSettings,
     parseStoryArg,
     resolveEnabled,
-    wordCount,
+    textRevision,
 } from '../src/core.js';
+
+function withCuts(message, cuts) {
+    return {
+        ...message,
+        extra: { ...message.extra, [EXTRA_KEY]: { cuts, revision: textRevision(message.mes) } },
+    };
+}
 
 test('endsMidSentence recognises unfinished text and ignores decoration', () => {
     assert.equal(endsMidSentence('She opened the door and'), true);
@@ -41,10 +48,22 @@ test('endsMidSentence recognises unfinished text and ignores decoration', () => 
 
 test('getCuts and classifyBlock derive origin from is_user and the recorded cuts', () => {
     assert.deepEqual(getCuts({}), []);
-    assert.deepEqual(getCuts({ extra: { [EXTRA_KEY]: { cuts: [3, -1, 'x', 7.5, 9] } } }), [3, 9]);
+    assert.deepEqual(getCuts(withCuts({ mes: '0123456789' }, [3, 9])), [3, 9]);
     assert.deepEqual(classifyBlock({ is_user: false, mes: 'model text' }), { origin: 'model', cut: null, cuts: [] });
     assert.deepEqual(classifyBlock({ is_user: true, mes: 'mine' }), { origin: 'user', cut: null, cuts: [] });
-    assert.deepEqual(classifyBlock({ is_user: true, mes: 'mine and theirs', extra: { [EXTRA_KEY]: { cuts: [4, 10] } } }), { origin: 'mixed', cut: 4, cuts: [4, 10] });
+    assert.deepEqual(classifyBlock(withCuts({ is_user: true, mes: 'mine and theirs' }, [4, 10])), { origin: 'mixed', cut: 4, cuts: [4, 10] });
+});
+
+test('getCuts rejects legacy, stale, malformed, unordered and out-of-range offsets', () => {
+    const text = 'abcdefghij';
+    assert.deepEqual(getCuts({ mes: text, extra: { [EXTRA_KEY]: { cuts: [3] } } }), []);
+    const stale = withCuts({ mes: text }, [3]);
+    stale.mes = `${text}!`;
+    assert.deepEqual(getCuts(stale), []);
+    for (const cuts of [[3, 3], [6, 2], [-1], ['3'], [11]]) {
+        assert.deepEqual(getCuts(withCuts({ mes: text }, cuts)), []);
+    }
+    assert.deepEqual(getCuts(withCuts({ mes: text }, [0, 10])), [0, 10]);
 });
 
 test('computeJoins marks blocks that finish the previous visible block', () => {
@@ -126,7 +145,7 @@ test('normalizeSettings applies defaults and keeps valid values', () => {
     assert.deepEqual(normalizeSettings(undefined), { ...DEFAULT_SETTINGS });
     assert.deepEqual(normalizeSettings('junk'), { ...DEFAULT_SETTINGS });
     const custom = normalizeSettings({ defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: ' ', transformsUseFullContext: true, extra: 1 });
-    assert.deepEqual(custom, { version: 1, defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: DEFAULT_SETTINGS.lengthHint, transformsUseFullContext: true });
+    assert.deepEqual(custom, { defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: DEFAULT_SETTINGS.lengthHint, transformsUseFullContext: true });
 });
 
 test('resolveEnabled prefers the chat flag, then the card, then the global default', () => {
@@ -146,9 +165,4 @@ test('parseStoryArg understands on, off, toggle and rejects junk', () => {
     assert.equal(parseStoryArg(undefined, false), true);
     assert.equal(parseStoryArg('toggle', false), true);
     assert.equal(parseStoryArg('maybe', false), null);
-});
-
-test('wordCount ignores hidden blocks', () => {
-    assert.equal(wordCount([{ mes: 'one two' }, { mes: 'three', is_system: true }, { mes: '  four\nfive ' }, null]), 4);
-    assert.equal(wordCount(undefined), 0);
 });

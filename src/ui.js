@@ -4,7 +4,7 @@
  * the settings drawer. The manuscript look itself is style.css under body.sbstory.
  */
 import * as api from './api.js';
-import { BODY_CLASS, DEFAULT_RULES, classifyBlock, computeJoins, wordCount } from './core.js';
+import { BODY_CLASS, DEFAULT_RULES, classifyBlock, computeJoins } from './core.js';
 
 const BAR_ID = 'sbstory-bar';
 const ROW_ID = 'sbstory-transforms';
@@ -15,7 +15,6 @@ const HINT_KEY = 'SillyBunnyStoryMode_editHintShown';
 let bar = null;
 let directionWrap = null;
 let directionInput = null;
-let wordsEl = null;
 let row = null;
 let rowStatus = null;
 let rowStop = null;
@@ -27,6 +26,8 @@ let drawerHandlers = { onChatToggle: null, onChange: null };
 let menuToggle = null;
 let lastEditorId = null;
 let selectionFrame = 0;
+let transformTextarea = null;
+let listenerController = null;
 
 export function el(tag, { className = '', text = '', attrs = {} } = {}) {
     const node = document.createElement(tag);
@@ -52,6 +53,11 @@ function iconButton({ id, icon, label, title, className = 'menu_button sbstory-b
         el('span', { className: 'sbstory-btn-label', text: label }),
     );
     button.addEventListener('mousedown', (event) => event.preventDefault());
+    button.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.stopPropagation();
+        }
+    });
     button.addEventListener('click', (event) => {
         event.preventDefault();
         void onClick(event);
@@ -67,8 +73,7 @@ export function mountBar() {
         return bar;
     }
     bar = el('div', { className: 'flex-container flexGap5 sbstory-bar', attrs: { id: BAR_ID, hidden: true, role: 'toolbar', 'aria-label': 'Story Mode' } });
-    wordsEl = el('span', { className: 'sbstory-words', attrs: { 'aria-live': 'polite' } });
-    directionWrap = el('div', { className: 'sbstory-direction-wrap', attrs: { hidden: true } });
+    directionWrap = el('div', { className: 'sbstory-direction-wrap', attrs: { id: 'sbstory-direction-wrap', hidden: true } });
     directionInput = el('input', {
         className: 'text_pole sbstory-direction',
         attrs: {
@@ -82,17 +87,20 @@ export function mountBar() {
     directionInput.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.isComposing) {
             event.preventDefault();
+            event.stopImmediatePropagation();
             void onContinue();
         }
     });
     directionWrap.append(directionInput);
+    const directionToggle = iconButton({ id: 'sbstory-direction-toggle', icon: 'fa-compass', label: 'Direction', title: 'Tell the model where the next passage should go. Used once.', onClick: toggleDirection });
+    directionToggle.setAttribute('aria-controls', 'sbstory-direction-wrap');
+    directionToggle.setAttribute('aria-expanded', 'false');
     bar.append(
         iconButton({ id: 'sbstory-continue', icon: 'fa-feather-pointed', label: 'Continue', title: 'Continue the story from where the text stops. Text in the box is added first.', onClick: onContinue }),
         iconButton({ id: 'sbstory-retry', icon: 'fa-arrows-rotate', label: 'Retry', title: 'Redo the last continuation', onClick: () => api.retry() }),
         iconButton({ id: 'sbstory-undo', icon: 'fa-rotate-left', label: 'Undo', title: 'Remove the last continuation', onClick: () => api.undo() }),
         iconButton({ id: 'sbstory-redo', icon: 'fa-rotate-right', label: 'Redo', title: 'Put the last removed continuation back', onClick: () => api.redo() }),
-        iconButton({ id: 'sbstory-direction-toggle', icon: 'fa-compass', label: 'Direction', title: 'Tell the model where the next passage should go. Used once.', onClick: toggleDirection }),
-        wordsEl,
+        directionToggle,
         directionWrap,
     );
     placeBar();
@@ -116,14 +124,9 @@ function placeBar() {
 
 async function onContinue() {
     const textarea = document.getElementById('send_textarea');
-    const hasText = Boolean(textarea && String(textarea.value).trim());
+    const hasText = Boolean(textarea && String(textarea.value).length);
     const direction = directionInput?.value?.trim() ?? '';
-    if (direction) {
-        api.setDirection(direction);
-    } else {
-        api.clearDirection();
-    }
-    await api.continueStory({ hasText });
+    await api.continueStory({ hasText, direction });
 }
 
 function toggleDirection() {
@@ -131,13 +134,14 @@ function toggleDirection() {
         return;
     }
     directionWrap.hidden = !directionWrap.hidden;
+    document.getElementById('sbstory-direction-toggle')?.setAttribute('aria-expanded', String(!directionWrap.hidden));
     if (!directionWrap.hidden) {
         directionInput.focus();
     }
 }
 
-export function clearDirectionInput() {
-    if (directionInput) {
+export function clearDirectionInput(submitted) {
+    if (directionInput && (submitted === undefined || directionInput.value.trim() === submitted)) {
         directionInput.value = '';
     }
 }
@@ -147,20 +151,12 @@ export function setBusy(busy) {
         return;
     }
     bar.toggleAttribute('data-busy', Boolean(busy));
-    for (const id of ['sbstory-continue', 'sbstory-retry', 'sbstory-undo', 'sbstory-redo']) {
+    for (const id of ['sbstory-continue', 'sbstory-retry', 'sbstory-undo', 'sbstory-redo', 'sbstory-direction-toggle', 'sbstory-direction']) {
         const button = document.getElementById(id);
         if (button) {
             button.disabled = Boolean(busy);
         }
     }
-}
-
-export function updateWords() {
-    if (!wordsEl) {
-        return;
-    }
-    const count = wordCount(api.ctx().chat);
-    wordsEl.textContent = `${count.toLocaleString()} ${count === 1 ? 'word' : 'words'}`;
 }
 
 // ---------------------------------------------------------------- selection rewrites (inside the host editor)
@@ -206,6 +202,7 @@ export function refreshTransformRow() {
         return;
     }
     if (!document.body.classList.contains(BODY_CLASS)) {
+        cancelTransform();
         hideRow();
         return;
     }
@@ -240,6 +237,10 @@ function setRowBusy(busy, status = '') {
         return;
     }
     row.toggleAttribute('data-busy', busy);
+    row.setAttribute('aria-busy', String(Boolean(busy)));
+    for (const button of row.querySelectorAll('.sbstory-tbtn:not(.sbstory-stop)')) {
+        button.disabled = Boolean(busy);
+    }
     if (rowStop) {
         rowStop.hidden = !busy;
     }
@@ -256,7 +257,7 @@ async function askInstruction() {
 
 async function runTransform(kind) {
     const selection = pendingSelection ?? currentEditSelection();
-    if (!selection || abortController) {
+    if (!selection || abortController || api.isBusy()) {
         return;
     }
     let instruction = '';
@@ -268,35 +269,62 @@ async function runTransform(kind) {
         instruction = String(answer);
     }
     const { textarea, start, end } = selection;
+    if (!textarea.isConnected || textarea !== document.getElementById('curEditTextarea') || !document.body.classList.contains(BODY_CLASS)) {
+        return;
+    }
     const value = textarea.value;
-    abortController = new AbortController();
+    const controller = new AbortController();
+    abortController = controller;
+    transformTextarea = textarea;
     setRowBusy(true, 'Working…');
     try {
-        const result = await api.runTransform({ kind, instruction, value, start, end, signal: abortController.signal });
+        const result = await api.runTransform({ kind, instruction, value, start, end, signal: controller.signal });
+        if (controller.signal.aborted || abortController !== controller) {
+            if (abortController === controller) {
+                setStatus('Stopped.');
+            }
+            return;
+        }
         if (!result) {
             setStatus('Nothing came back.');
             return;
         }
-        if (textarea.value !== value) {
+        if (textarea.value !== value || !textarea.isConnected || textarea !== document.getElementById('curEditTextarea') || !document.body.classList.contains(BODY_CLASS)) {
             setStatus('The text changed while waiting, so nothing was replaced.');
             return;
         }
-        textarea.setRangeText(result, start, end, 'select');
-        textarea.dispatchEvent(new Event('input', { bubbles: true }));
         textarea.focus();
-        setStatus('Replaced. Ctrl+Z inside the box undoes it; Done or Escape keeps it.');
+        textarea.setSelectionRange(start, end);
+        let undoable = false;
+        try {
+            undoable = document.execCommand?.('insertText', false, result) === true;
+        } catch {
+            // Fall back below when the browser does not support undoable scripted insertion.
+        }
+        if (!undoable) {
+            textarea.setRangeText(result, start, end, 'select');
+            textarea.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        setStatus(undoable ? 'Replaced. Ctrl+Z undoes it; Done or Escape keeps it.' : 'Replaced. Done or Escape keeps it.');
     } catch (error) {
-        if (abortController?.signal.aborted || error?.name === 'AbortError') {
+        if (controller.signal.aborted || error?.name === 'AbortError') {
             setStatus('Stopped.');
         } else {
             console.error('[Story Mode] rewrite failed', error);
             setStatus('That did not work; the console has the error.');
         }
     } finally {
-        abortController = null;
-        setRowBusy(false, rowStatus?.textContent ?? '');
-        refreshTransformRow();
+        if (abortController === controller) {
+            abortController = null;
+            transformTextarea = null;
+            setRowBusy(false, rowStatus?.textContent ?? '');
+            refreshTransformRow();
+        }
     }
+}
+
+export function cancelTransform() {
+    abortController?.abort();
 }
 
 function scheduleSelectionRefresh() {
@@ -308,20 +336,25 @@ export function bindSelectionWatch() {
     if (document.documentElement.dataset.sbstorySelection) {
         return;
     }
+    listenerController ??= new AbortController();
+    const { signal } = listenerController;
     document.documentElement.dataset.sbstorySelection = '1';
-    document.addEventListener('selectionchange', scheduleSelectionRefresh);
+    document.addEventListener('selectionchange', scheduleSelectionRefresh, { signal });
     for (const type of ['mouseup', 'keyup', 'touchend', 'select']) {
         document.addEventListener(type, (event) => {
             if (event.target instanceof Element && event.target.id === 'curEditTextarea') {
                 scheduleSelectionRefresh();
             }
-        }, true);
+        }, { capture: true, signal });
     }
 }
 
 /** Called from the #chat mutation observer: notices a host editor opening so an unchanged close keeps its cuts. */
 export function checkEditor() {
     const textarea = document.getElementById('curEditTextarea');
+    if (abortController && textarea !== transformTextarea) {
+        cancelTransform();
+    }
     if (!textarea) {
         lastEditorId = null;
         return;
@@ -363,7 +396,6 @@ export function stampBlocks() {
             unwrapTail(mesEl);
         }
     }
-    updateWords();
 }
 
 export function cleanupStamps() {
@@ -398,7 +430,7 @@ function wrapTail(mesEl, message, index, cut) {
         return;
     }
     const key = `${cut}:${String(message.mes ?? '').length}`;
-    if (text.dataset.sbstoryWrapped === key) {
+    if (text.dataset.sbstoryWrapped === key && text.querySelector('.sbstory-model')) {
         return;
     }
     unwrapTail(mesEl);
@@ -461,16 +493,20 @@ export function bindClickToEdit() {
     if (!chat || chat.dataset.sbstoryBound) {
         return;
     }
+    listenerController ??= new AbortController();
     chat.dataset.sbstoryBound = '1';
     chat.addEventListener('click', (event) => {
         if (!document.body.classList.contains(BODY_CLASS)) {
+            return;
+        }
+        if (api.isBusy()) {
             return;
         }
         const target = event.target;
         if (!(target instanceof Element)) {
             return;
         }
-        if (target.closest('#curEditTextarea, #sbstory-transforms, a, img, video, audio, summary, details, button, input, textarea, select, label, .mes_buttons, .mes_edit_buttons, .swipe_left, .swipeRightBlock, .code-copy, .mes_reasoning_details')) {
+        if (target.closest('#curEditTextarea, #sbstory-transforms, a, img, video, audio, summary, details, button, input, textarea, select, label, [role="button"], [tabindex], [contenteditable], .interactable, .mes_buttons, .mes_edit_buttons, .swipe_left, .swipeRightBlock, .code-copy, .mes_reasoning_details')) {
             return;
         }
         const editing = document.getElementById('curEditTextarea');
@@ -496,15 +532,24 @@ export function bindClickToEdit() {
         }
         button.click();
         showEditHintOnce();
-    });
+    }, { signal: listenerController.signal });
 }
 
 export function bindEscapeSave() {
     if (document.documentElement.dataset.sbstoryEscape) {
         return;
     }
+    listenerController ??= new AbortController();
     document.documentElement.dataset.sbstoryEscape = '1';
     document.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && event.altKey && !event.isComposing && document.body.classList.contains(BODY_CLASS)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            if (!api.isBusy()) {
+                void onContinue();
+            }
+            return;
+        }
         if (event.key !== 'Escape' || event.isComposing) {
             return;
         }
@@ -512,7 +557,12 @@ export function bindEscapeSave() {
             return;
         }
         const textarea = document.getElementById('curEditTextarea');
-        if (!textarea || document.activeElement !== textarea) {
+        const editingMessage = textarea?.closest('.mes');
+        const focused = document.activeElement;
+        if (!textarea || (focused !== textarea && !row?.contains(focused) && !editingMessage?.contains(focused))) {
+            return;
+        }
+        if (document.querySelector('.autoComplete-wrap[data-macros-autocomplete-style], .autoComplete-detailsWrap[data-macros-autocomplete-style]')) {
             return;
         }
         event.preventDefault();
@@ -523,7 +573,7 @@ export function bindEscapeSave() {
             return;
         }
         textarea.closest('.mes')?.querySelector('.mes_edit_done')?.click();
-    }, true);
+    }, { capture: true, signal: listenerController.signal });
 }
 
 // ---------------------------------------------------------------- wand entry
@@ -548,6 +598,7 @@ export function ensureMenuItem({ onToggle }) {
         menuItem.addEventListener('click', activate);
         menuItem.addEventListener('keydown', (event) => {
             if (event.key === 'Enter' || event.key === ' ') {
+                event.stopPropagation();
                 activate(event);
             }
         });
@@ -582,16 +633,10 @@ export function ensureDrawer(handlers) {
     }
     if (!drawer) {
         drawer = el('div', { className: 'inline-drawer sbstory-drawer', attrs: { id: DRAWER_ID, 'data-extension-name': 'SillyBunny-Story-Mode' } });
-        const toggle = el('div', { className: 'inline-drawer-toggle inline-drawer-header', attrs: { tabindex: '0', 'aria-expanded': 'false', 'aria-controls': `${DRAWER_ID}-content` } });
-        toggle.append(el('b', { text: 'Story Mode' }), el('div', { className: 'inline-drawer-icon fa-solid fa-circle-chevron-down down' }));
+        const toggle = el('button', { className: 'inline-drawer-toggle inline-drawer-header', attrs: { type: 'button', 'aria-expanded': 'false', 'aria-controls': `${DRAWER_ID}-content` } });
+        toggle.append(el('b', { text: 'Story Mode' }), el('span', { className: 'sbstory-drawer-icon fa-solid fa-circle-chevron-down', attrs: { 'aria-hidden': 'true' } }));
         toggle.addEventListener('click', () => {
             toggle.setAttribute('aria-expanded', String(toggle.getAttribute('aria-expanded') !== 'true'));
-        });
-        toggle.addEventListener('keydown', (event) => {
-            if ((event.key === 'Enter' || event.key === ' ') && event.target === toggle) {
-                event.preventDefault();
-                toggle.click();
-            }
         });
         const content = el('div', { className: 'inline-drawer-content', attrs: { id: `${DRAWER_ID}-content` } });
         drawer.append(toggle, content);
@@ -606,7 +651,21 @@ function checkboxRow({ id, label, checked, onChange, hint = '' }) {
     const wrap = el('label', { className: 'checkbox_label sbstory-row', attrs: { for: id } });
     const input = el('input', { attrs: { type: 'checkbox', id } });
     input.checked = Boolean(checked);
-    input.addEventListener('change', () => void onChange(input.checked));
+    input.addEventListener('change', async () => {
+        const next = input.checked;
+        input.disabled = true;
+        try {
+            if (await onChange(next) === false) {
+                input.checked = !next;
+            }
+        } catch (error) {
+            console.error('[Story Mode] setting could not be saved', error);
+            input.checked = !next;
+            api.toast('error', 'That Story Mode setting could not be saved.');
+        } finally {
+            input.disabled = false;
+        }
+    });
     wrap.append(input, el('span', { text: label }));
     if (hint) {
         wrap.title = hint;
@@ -666,15 +725,25 @@ export function renderDrawer() {
             checked: card?.default === true,
             hint: 'Stored in the card, so it travels with it.',
             onChange: async (value) => {
-                await api.setCardConfig({ default: value ? true : undefined });
+                await api.setCardConfig({ default: value });
                 drawerHandlers.onChange?.();
             },
         }));
         const instruction = el('textarea', { className: 'text_pole sbstory-textarea', attrs: { id: 'sbstory-opt-card-rules', rows: '4', placeholder: 'Leave empty to use the rules below.' } });
         instruction.value = card?.instruction ?? '';
         instruction.addEventListener('change', async () => {
-            await api.setCardConfig({ instruction: instruction.value.trim() });
-            drawerHandlers.onChange?.();
+            const previous = card?.instruction ?? '';
+            instruction.disabled = true;
+            try {
+                await api.setCardConfig({ instruction: instruction.value.trim() });
+                drawerHandlers.onChange?.();
+            } catch (error) {
+                console.error('[Story Mode] card rules could not be saved', error);
+                instruction.value = previous;
+                api.toast('error', 'Those card rules could not be saved.');
+            } finally {
+                instruction.disabled = false;
+            }
         });
         section.append(field('Co-writing rules for this card (optional)', instruction, 'Replaces the general rules when this card is open. {{length}} becomes the length hint.'));
         content.append(section);
@@ -707,6 +776,11 @@ export function renderDrawer() {
     });
     const rulesField = field('Rules sent before the block being continued', rules, '{{length}} becomes the length hint; {{user}} is the usual macro.');
     const reset = el('button', { className: 'menu_button sbstory-reset', text: 'Reset rules', attrs: { type: 'button' } });
+    reset.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            event.stopPropagation();
+        }
+    });
     reset.addEventListener('click', () => {
         rules.value = DEFAULT_RULES;
         api.updateSettings({ rules: DEFAULT_RULES });
@@ -746,16 +820,30 @@ export function applyState(enabled) {
     }
     refreshMenuItem(enabled);
     if (enabled) {
+        checkEditor();
+        refreshTransformRow();
         stampBlocks();
     } else {
+        cancelTransform();
         cleanupStamps();
         hideRow();
     }
 }
 
 export function unmountAll() {
-    abortController?.abort();
+    cancelTransform();
     abortController = null;
+    transformTextarea = null;
+    listenerController?.abort();
+    listenerController = null;
+    cancelAnimationFrame(selectionFrame);
+    selectionFrame = 0;
+    delete document.documentElement.dataset.sbstorySelection;
+    delete document.documentElement.dataset.sbstoryEscape;
+    const chat = document.getElementById('chat');
+    if (chat) {
+        delete chat.dataset.sbstoryBound;
+    }
     document.body.classList.remove(BODY_CLASS, 'sbstory-serif', 'sbstory-notint');
     cleanupStamps();
     bar?.remove();
@@ -765,7 +853,6 @@ export function unmountAll() {
     bar = null;
     directionWrap = null;
     directionInput = null;
-    wordsEl = null;
     row = null;
     rowStatus = null;
     rowStop = null;

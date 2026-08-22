@@ -11,7 +11,6 @@ const subscriptions = [];
 let active = false;
 let observer = null;
 let stampFrame = 0;
-let commandsReady = false;
 
 function ctx() {
     return globalThis.SillyTavern.getContext();
@@ -37,7 +36,7 @@ function assertCapabilities(context) {
     for (const [name, available] of [
         ['extension settings', context.extensionSettings && typeof context.saveSettingsDebounced === 'function'],
         ['event source', typeof context.eventSource?.on === 'function' && typeof context.eventSource?.removeListener === 'function'],
-        ['chat metadata', typeof context.saveMetadataDebounced === 'function'],
+        ['chat metadata', typeof context.saveMetadata === 'function'],
         ['generation', typeof context.generate === 'function' && typeof context.generateRaw === 'function' && typeof context.generateQuietPrompt === 'function'],
         ['prompt injection', typeof context.setExtensionPrompt === 'function'],
         ['message editing', typeof context.updateMessageBlock === 'function' && typeof context.deleteLastMessage === 'function' && typeof context.addOneMessage === 'function' && typeof context.saveChat === 'function'],
@@ -49,7 +48,7 @@ function assertCapabilities(context) {
             missing.push(name);
         }
     }
-    for (const event of ['APP_READY', 'CHAT_CHANGED', 'MESSAGE_SENT', 'GENERATION_STARTED', 'GENERATION_ENDED', 'GENERATION_STOPPED', 'MESSAGE_EDITED']) {
+    for (const event of ['APP_READY', 'CHAT_CHANGED', 'MESSAGE_SENT', 'MESSAGE_EDITED', 'GENERATION_STARTED', 'GENERATION_ENDED', 'GENERATION_STOPPED']) {
         if (!context.eventTypes?.[event]) {
             missing.push(`event ${event}`);
         }
@@ -65,6 +64,9 @@ function scheduleStamp() {
     }
     cancelAnimationFrame(stampFrame);
     stampFrame = requestAnimationFrame(() => {
+        if (!document.body.classList.contains(BODY_CLASS)) {
+            return;
+        }
         try {
             ui.stampBlocks();
         } catch (error) {
@@ -74,7 +76,10 @@ function scheduleStamp() {
 }
 
 /** Re-resolves the per-chat state and makes the page match it. */
-function apply() {
+function apply({ renderDrawer = true } = {}) {
+    if (!active) {
+        return;
+    }
     const enabled = api.isEnabled();
     if (enabled) {
         api.setRules();
@@ -83,21 +88,29 @@ function apply() {
         api.clearDirection();
     }
     ui.applyState(enabled);
-    ui.renderDrawer();
+    if (renderDrawer) {
+        ui.renderDrawer();
+    }
 }
 
-async function setEnabled(enabled) {
+async function setEnabled(enabled, { renderDrawer = false } = {}) {
+    if (!active) {
+        return false;
+    }
     if (!api.hasChat()) {
         api.toast('info', 'Open a chat first, then turn Story Mode on.');
         ui.renderDrawer();
         return false;
     }
-    api.setChatFlag(enabled);
-    apply();
-    return enabled;
+    await api.setChatFlag(enabled);
+    apply({ renderDrawer });
+    return true;
 }
 
 async function onStoryCommand(arg) {
+    if (!active) {
+        return 'Story Mode is disabled.';
+    }
     const next = parseStoryArg(arg, api.isEnabled());
     if (next === null) {
         return 'Use /story on, /story off or /story toggle.';
@@ -105,7 +118,7 @@ async function onStoryCommand(arg) {
     if (!api.hasChat()) {
         return 'Open a chat first.';
     }
-    await setEnabled(next);
+    await setEnabled(next, { renderDrawer: true });
     return next ? 'on' : 'off';
 }
 
@@ -119,6 +132,8 @@ function observeChat() {
         scheduleStamp();
     });
     observer.observe(chat, { childList: true, subtree: true });
+    ui.checkEditor();
+    ui.refreshTransformRow();
 }
 
 function mountAll() {
@@ -127,13 +142,12 @@ function mountAll() {
     ui.bindClickToEdit();
     ui.bindEscapeSave();
     ui.bindSelectionWatch();
-    ui.ensureMenuItem({ onToggle: () => setEnabled(!api.isEnabled()) });
-    ui.ensureDrawer({ onChatToggle: setEnabled, onChange: apply });
+    ui.ensureMenuItem({ onToggle: () => setEnabled(!api.isEnabled(), { renderDrawer: true }) });
+    ui.ensureDrawer({ onChatToggle: setEnabled, onChange: () => apply({ renderDrawer: false }) });
     observeChat();
-    if (!commandsReady) {
-        commandsReady = api.registerCommands({ onToggle: onStoryCommand });
-    }
+    api.registerCommands({ onToggle: onStoryCommand });
     apply();
+    ui.setBusy(api.isBusy());
 }
 
 function start() {
@@ -143,13 +157,19 @@ function start() {
     const context = ctx();
     assertCapabilities(context);
     const events = context.eventTypes;
+    active = true;
     try {
         api.setHooks({
-            afterGeneration: () => {
-                ui.clearDirectionInput();
-                ui.setBusy(false);
+            afterGeneration: (action) => {
+                if (!active) {
+                    api.clearRules();
+                    api.clearDirection();
+                    return;
+                }
+                ui.clearDirectionInput(action.direction);
                 scheduleStamp();
             },
+            busyChanged: (busy) => active && ui.setBusy(busy),
         });
         subscribe(context, events.APP_READY, () => {
             try {
@@ -160,27 +180,33 @@ function start() {
         });
         subscribe(context, events.CHAT_CHANGED, () => {
             api.clearRedo();
-            api.resetInflight();
-            ui.setBusy(false);
+            api.clearDirection();
+            ui.clearDirectionInput();
+            ui.cancelTransform();
+            ui.setBusy(api.isBusy());
             apply();
         });
-        subscribe(context, events.MESSAGE_SENT, (index) => api.onMessageSent(index));
-        subscribe(context, events.GENERATION_STARTED, (type, params, dryRun) => {
-            api.onGenerationStarted(type, params, dryRun);
-            if (api.isInflight()) {
-                ui.setBusy(true);
-            }
+        subscribe(context, events.MESSAGE_SENT, (index) => {
+            api.onMessageSent(index);
+            api.clearRedoIfDiverged();
         });
-        subscribe(context, events.GENERATION_ENDED, () => api.onGenerationEnded());
-        subscribe(context, events.GENERATION_STOPPED, () => api.onGenerationEnded());
         subscribe(context, events.MESSAGE_EDITED, (index) => {
             api.onMessageEdited(index);
+            api.clearRedoIfDiverged();
             scheduleStamp();
         });
-        for (const name of ['MESSAGE_UPDATED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'MESSAGE_RECEIVED', 'MORE_MESSAGES_LOADED', 'CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED']) {
+        for (const name of ['MESSAGE_UPDATED', 'MESSAGE_SWIPED', 'MESSAGE_DELETED', 'MESSAGE_RECEIVED']) {
+            subscribe(context, events[name], () => {
+                api.clearRedoIfDiverged();
+                scheduleStamp();
+            });
+        }
+        subscribe(context, events.GENERATION_STARTED, api.onGenerationStarted);
+        subscribe(context, events.GENERATION_ENDED, api.onGenerationFinished);
+        subscribe(context, events.GENERATION_STOPPED, api.onGenerationFinished);
+        for (const name of ['MORE_MESSAGES_LOADED', 'CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED']) {
             subscribe(context, events[name], scheduleStamp);
         }
-        active = true;
         // APP_READY is sticky in the host, but enabling after load still needs a direct mount.
         if (document.getElementById('send_form')) {
             mountAll();
@@ -188,23 +214,26 @@ function start() {
     } catch (error) {
         active = false;
         unsubscribeAll();
+        observer?.disconnect();
+        observer = null;
+        cancelAnimationFrame(stampFrame);
+        ui.unmountAll();
         throw error;
     }
 }
 
 async function stop() {
-    if (!active) {
-        return;
-    }
     active = false;
     unsubscribeAll();
     observer?.disconnect();
     observer = null;
     cancelAnimationFrame(stampFrame);
     try {
-        api.clearRules();
-        api.clearDirection();
-        api.resetInflight();
+        if (!api.isInflight()) {
+            api.clearRules();
+            api.clearDirection();
+        }
+        api.resetHostBusy();
         api.clearRedo();
     } catch (error) {
         console.warn('[Story Mode] cleanup skipped a step', error);
