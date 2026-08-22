@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as api from '../src/api.js';
-import { CARD_KEY, CHAT_KEY, EXTRA_KEY, PROMPT_DIRECTION_KEY, PROMPT_RULES_KEY, SETTINGS_KEY, getCuts, textRevision } from '../src/core.js';
+import { CARD_KEY, CHAT_KEY, DEFAULT_SETTINGS, EXTRA_KEY, PROMPT_DIRECTION_KEY, PROMPT_RULES_KEY, SETTINGS_KEY, getCuts, textRevision } from '../src/core.js';
 
 function makeContext({ chat = [], chatId = 'chat-1', characterId = 0, characters = [{ name: 'Ann', data: { extensions: {} } }], groupId = null, chatMetadata = {}, extensionSettings = {} } = {}) {
     const calls = { generate: [], prompts: [], updates: [], saveChat: 0, saveChatOptions: [], deleteLast: 0, swipeRight: 0, refresh: 0, added: [], cardWrites: [], raw: null, quiet: null, saveMeta: 0 };
@@ -26,6 +26,12 @@ function makeContext({ chat = [], chatId = 'chat-1', characterId = 0, characters
         async writeExtensionField(id, key, value) { calls.cardWrites.push([id, key, value]); characters[id].data.extensions[key] = value; },
         async generateRaw(args) { calls.raw = args; return context.rawResult; },
         async generateQuietPrompt(args) { calls.quiet = args; return 'quiet result'; },
+        eventTypes: { CHAT_COMPLETION_SETTINGS_READY: 'ccsr', TEXT_COMPLETION_SETTINGS_READY: 'tcsr' },
+        eventSource: {
+            handlers: {},
+            on(type, handler) { (this.handlers[type] ??= []).push(handler); },
+            removeListener(type, handler) { this.handlers[type] = (this.handlers[type] ?? []).filter((h) => h !== handler); },
+        },
     };
     return { context, calls };
 }
@@ -83,12 +89,12 @@ test('rules use the card instruction when present and are injected at depth 1', 
     api.setRules();
     let [key, text, position, depth, scan, role] = calls.prompts.at(-1);
     assert.equal(key, PROMPT_RULES_KEY);
-    assert.ok(text.includes('two to four paragraphs'));
+    assert.ok(text.includes(DEFAULT_SETTINGS.lengthHint));
     assert.deepEqual([position, depth, scan, role], [1, 1, false, 0]);
     context.characters[0].data.extensions[CARD_KEY] = { instruction: 'Card rules: {{length}}.' };
     api.setRules();
     [key, text] = calls.prompts.at(-1);
-    assert.equal(text, 'Card rules: two to four paragraphs.');
+    assert.equal(text, `Card rules: ${DEFAULT_SETTINGS.lengthHint}.`);
     api.clearRules();
     assert.deepEqual(calls.prompts.at(-1), [PROMPT_RULES_KEY, '', 1, 1, false, 0]);
 });
@@ -147,6 +153,28 @@ test('direction remains active until the owned generation promise settles', asyn
     await generation;
     assert.equal(api.isInflight(), false);
     assert.deepEqual(calls.prompts.at(-1), [PROMPT_DIRECTION_KEY, '', 1, 0, false, 0]);
+});
+
+test('a continuation caps the reply length through the settings-ready events, then unhooks', async () => {
+    const { context, calls } = use({ chat: [{ is_user: false, mes: 'Start' }], extensionSettings: { [SETTINGS_KEY]: { maxTokens: 120 } } });
+    let seen = null;
+    context.onGenerate = async () => {
+        const chat = { max_tokens: 800 };
+        const text = { max_new_tokens: 50, max_tokens: 50 };
+        for (const handler of context.eventSource.handlers.ccsr ?? []) handler(chat);
+        for (const handler of context.eventSource.handlers.tcsr ?? []) handler(text);
+        seen = { chat: chat.max_tokens, text: [text.max_new_tokens, text.max_tokens] };
+    };
+    assert.equal(await api.continueStory({ hasText: false }), true);
+    assert.deepEqual(seen, { chat: 120, text: [50, 50] });
+    assert.deepEqual([context.eventSource.handlers.ccsr, context.eventSource.handlers.tcsr], [[], []]);
+    assert.equal(calls.generate.length, 1);
+
+    api.updateSettings({ maxTokens: 0 });
+    seen = null;
+    context.onGenerate = async () => { seen = { hooked: (context.eventSource.handlers.ccsr ?? []).length }; };
+    await api.continueStory({ hasText: false });
+    assert.deepEqual(seen, { hooked: 0 });
 });
 
 test('Story continuation pauses host Auto-continue and restores it afterwards', async () => {

@@ -18,19 +18,37 @@ export const DEFAULT_RULES = '[Story Mode: you and {{user}} are co-writing one c
     + 'Every message so far, including {{user}}\'s, is consecutive text of the same story, not dialogue between you. '
     + 'Continue from exactly where the last text stops - mid-sentence if it stops mid-sentence - without repeating or rephrasing earlier text, '
     + 'and with no speaker labels, headings, or commentary. Keep the same tense, person, and style. '
+    + 'Write {{length}} and stop there, even mid-scene: do not wrap up, resolve, or hand the turn back.]';
+
+/** The 0.1.0 defaults, so an untouched install picks up the new ones instead of keeping a copy. */
+const LEGACY_RULES = '[Story Mode: you and {{user}} are co-writing one continuous manuscript. '
+    + 'Every message so far, including {{user}}\'s, is consecutive text of the same story, not dialogue between you. '
+    + 'Continue from exactly where the last text stops - mid-sentence if it stops mid-sentence - without repeating or rephrasing earlier text, '
+    + 'and with no speaker labels, headings, or commentary. Keep the same tense, person, and style. '
     + 'Write {{length}}, then stop at a natural beat.]';
+const LEGACY_LENGTH_HINT = 'two to four paragraphs';
 
 export const DEFAULT_SETTINGS = Object.freeze({
     defaultOn: false,
     tint: true,
     serif: false,
     rules: DEFAULT_RULES,
-    lengthHint: 'two to four paragraphs',
+    lengthHint: 'about a paragraph',
+    /** Hard cap on a continuation's reply, like NovelAI's output length; 0 = the preset's response length. */
+    maxTokens: 160,
     transformsUseFullContext: false,
 });
 
 function nonEmptyText(value, fallback) {
     return typeof value === 'string' && value.trim() ? value : fallback;
+}
+
+function tokenCap(value, fallback) {
+    if (value === '' || value === null || value === undefined) {
+        return fallback;
+    }
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? Math.round(number) : fallback;
 }
 
 export function normalizeSettings(raw) {
@@ -39,8 +57,9 @@ export function normalizeSettings(raw) {
         defaultOn: source.defaultOn === true,
         tint: source.tint !== false,
         serif: source.serif === true,
-        rules: nonEmptyText(source.rules, DEFAULT_SETTINGS.rules),
-        lengthHint: nonEmptyText(source.lengthHint, DEFAULT_SETTINGS.lengthHint),
+        rules: nonEmptyText(source.rules === LEGACY_RULES ? '' : source.rules, DEFAULT_SETTINGS.rules),
+        lengthHint: nonEmptyText(source.lengthHint === LEGACY_LENGTH_HINT ? '' : source.lengthHint, DEFAULT_SETTINGS.lengthHint),
+        maxTokens: tokenCap(source.maxTokens, DEFAULT_SETTINGS.maxTokens),
         transformsUseFullContext: source.transformsUseFullContext === true,
     };
 }

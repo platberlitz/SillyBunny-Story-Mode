@@ -19,6 +19,8 @@ No build step, no dependencies.
 
 **Continue** is the button above the composer. With text in the box, your text goes in as the next block and the model continues from the end of it. With the box empty, the model extends the last paragraph. Either way it's SillyBunny's own Continue underneath, so if you're on Claude with 'Continue prefill' ticked, a model block is handed back as a prefill and continuations really do pick up mid-word. Alt+Enter does the same from the keyboard.
 
+Each continuation is cut off at a token limit (160 by default), the way NovelAI's output length works, so the model stops short instead of finishing a whole reply; press Continue again to keep going, or Retry if you want a different passage. The limit is a setting (0 means your preset's response length), and it only applies to Story Mode's own continuations, never to the normal send button.
+
 **Retry** redoes the last continuation. **Undo** removes it, **Redo** puts it back. If the last block came from the normal send button instead, Retry swipes it and Undo deletes it, which is just SillyBunny doing what it always does. The three grey out when there is nothing for them to do, so a block you typed yourself can't be undone by accident. On a phone, or with a narrow chat pane, they shrink to icons and Continue keeps its label.
 
 **Direction** opens a one-line box. Whatever you type there goes to the model for the next continuation only and is cleared afterwards. 'Have the stranger turn out to be her brother', that sort of thing. It's NovelAI's inline instruction without the curly braces. Enter in the box continues; Escape closes it.
@@ -27,11 +29,13 @@ No build step, no dependencies.
 
 **Rewrite a selection.** While a paragraph is open for editing, select some text and a small row appears under the box: Rewrite, Expand, Compress, Custom... It stays on screen while you scroll a long paragraph. The result replaces the selection and stays selected, so you can run another pass on it straight away; nothing is saved until you close the editor, unless SillyBunny's message-edit auto-save setting is on. The row confirms when the browser added it to Ctrl+Z history. By default the model only sees the selection and a couple of paragraphs either side, which is cheap and quick; there's a setting to send the whole story if you'd rather it matched the voice better.
 
+**Room to read.** On a desktop the manuscript uses more of the screen than a chat does: while Story Mode is on the chat column grows to about 58em unless your Chat Width setting is already wider, and the text itself stays under about 50em per line.
+
 **Shading.** Text the model wrote gets a faint shade; yours doesn't. When the model finishes a paragraph you started, only its part is shaded. Editing a block resets that block to plain. Turn shading off in the settings if it annoys you.
 
 ## What the model actually sees
 
-The usual SillyBunny prompt. Story Mode adds one short system line just before the block being continued: you're co-writing one manuscript, keep going from exactly where the text stops, write roughly this much. You can edit that text in the settings, and a card can carry its own version.
+The usual SillyBunny prompt. Story Mode adds one short system line just before the block being continued: you're co-writing one manuscript, keep going from exactly where the text stops, write roughly this much and stop there without wrapping up. You can edit that text in the settings, and a card can carry its own version. If a roleplay preset still makes the model finish whole scenes, the token limit above is what actually stops it.
 
 Everything else comes from what you already have:
 
@@ -67,7 +71,7 @@ For an ensemble, put a 'Narrator' card (world and style) and one card per lead i
 
 ## Settings
 
-Customize › Extensions › Story Mode: the per-chat switch, the start-in-Story-Mode default, the open card's own switch and rules, shading, serif font, the rules text (with a reset), the length hint, and whether rewrites see the whole story.
+Customize › Extensions › Story Mode: the per-chat switch, the start-in-Story-Mode default, the open card's own switch and rules, shading, serif font, the rules text (with a reset), the length hint, the token limit per continuation, and whether rewrites see the whole story.
 
 ## Development
 

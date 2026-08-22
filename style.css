@@ -5,8 +5,14 @@
 
 /* ---------------------------------------------------------------- story bar (above the composer) */
 
+/* The bar states its own width: themes turn #send_form into a centred column (Moonlit Echoes with
+   Input History), and a flex-basis alone collapses under inline-size containment there. */
 #sbstory-bar {
-    flex-basis: 100%;
+    flex: 0 0 auto;
+    width: 100%;
+    min-width: 0;
+    grid-column: 1 / -1;
+    box-sizing: border-box;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -25,7 +31,7 @@
 
 /* Narrow bar (phones, a narrow chat pane): Continue keeps its label, the history buttons go icon-only. */
 @container (width < 36em) {
-    #sbstory-bar .sbstory-btn:not(.sbstory-primary) .sbstory-btn-label {
+    #sbstory-bar .sbstory-btn:not(#sbstory-continue) .sbstory-btn-label {
         display: none;
     }
 }
@@ -46,10 +52,17 @@
 
 /* ---------------------------------------------------------------- the manuscript */
 
+/* Above the mobile shell, the page is the manuscript: use the screen. The chat-width setting only ever widens it further. */
+@media (min-width: 769px) {
+    body.sbstory:not(.movingUI) #sheld {
+        width: max(var(--sheldWidth, 50vw), min(100vw - 48px, 58em));
+    }
+}
+
 body.sbstory #chat .mes:not(.smallSysMes):not(.displayNone):not([hidden]) {
     display: block !important;
     grid-template-columns: none !important;
-    max-width: min(60ch, 100%);
+    max-width: min(50em, 100%);
     margin: 0 auto !important;
     padding: 0 12px 0.85em !important;
     background: transparent !important;

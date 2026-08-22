@@ -145,8 +145,20 @@ test('cleanTransformResult strips fences, labels and unwanted wrapping quotes', 
 test('normalizeSettings applies defaults and keeps valid values', () => {
     assert.deepEqual(normalizeSettings(undefined), { ...DEFAULT_SETTINGS });
     assert.deepEqual(normalizeSettings('junk'), { ...DEFAULT_SETTINGS });
-    const custom = normalizeSettings({ defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: ' ', transformsUseFullContext: true, extra: 1 });
-    assert.deepEqual(custom, { defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: DEFAULT_SETTINGS.lengthHint, transformsUseFullContext: true });
+    const custom = normalizeSettings({ defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: ' ', maxTokens: '240', transformsUseFullContext: true, extra: 1 });
+    assert.deepEqual(custom, { defaultOn: true, tint: false, serif: true, rules: 'R', lengthHint: DEFAULT_SETTINGS.lengthHint, maxTokens: 240, transformsUseFullContext: true });
+    assert.equal(normalizeSettings({ maxTokens: 0 }).maxTokens, 0);
+    assert.equal(normalizeSettings({ maxTokens: -5 }).maxTokens, DEFAULT_SETTINGS.maxTokens);
+    assert.equal(normalizeSettings({ maxTokens: 'lots' }).maxTokens, DEFAULT_SETTINGS.maxTokens);
+});
+
+test('normalizeSettings moves an untouched 0.1.0 install to the new defaults but keeps edited text', () => {
+    const legacyRules = DEFAULT_RULES.replace(' and stop there, even mid-scene: do not wrap up, resolve, or hand the turn back.]', ', then stop at a natural beat.]');
+    const migrated = normalizeSettings({ rules: legacyRules, lengthHint: 'two to four paragraphs' });
+    assert.equal(migrated.rules, DEFAULT_RULES);
+    assert.equal(migrated.lengthHint, DEFAULT_SETTINGS.lengthHint);
+    const kept = normalizeSettings({ rules: 'Mine', lengthHint: 'three lines' });
+    assert.deepEqual([kept.rules, kept.lengthHint], ['Mine', 'three lines']);
 });
 
 test('resolveEnabled prefers the chat flag, then the card, then the global default', () => {

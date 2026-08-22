@@ -431,6 +431,42 @@ function composerHasText(fallback) {
 }
 
 /**
+ * NovelAI-style output length: while the story continuation runs, cap the
+ * reply through the host's settings-ready events (chat and text completion)
+ * instead of touching the preset. Returns the unhook function.
+ */
+function hookTokenCap(context, maxTokens) {
+    const cap = Number(maxTokens);
+    const events = context.eventTypes;
+    const source = context.eventSource;
+    if (!(cap > 0) || !events || typeof source?.on !== 'function') {
+        return () => {};
+    }
+    const clamp = (value) => Math.min(Number(value) > 0 ? Number(value) : cap, cap);
+    const onChat = (data) => {
+        if (data && typeof data === 'object') {
+            data.max_tokens = clamp(data.max_tokens);
+        }
+    };
+    const onText = (params) => {
+        if (params && typeof params === 'object') {
+            const value = clamp(params.max_new_tokens ?? params.max_tokens);
+            params.max_new_tokens = value;
+            params.max_tokens = value;
+        }
+    };
+    const pairs = [[events.CHAT_COMPLETION_SETTINGS_READY, onChat], [events.TEXT_COMPLETION_SETTINGS_READY, onText]].filter(([type]) => type);
+    for (const [type, handler] of pairs) {
+        source.on(type, handler);
+    }
+    return () => {
+        for (const [type, handler] of pairs) {
+            source.removeListener?.(type, handler);
+        }
+    };
+}
+
+/**
  * Continue the manuscript. With text in the composer the host adds it as the
  * user's block first (Generate consumes the textarea for type 'continue') and
  * then continues that block; with an empty composer it extends the last block.
@@ -483,9 +519,11 @@ async function continueUnlocked({ hasText: hasTextHint = false, direction = '', 
         if (restoreAutoContinue) {
             autoContinue.enabled = false;
         }
+        const unhookTokenCap = hookTokenCap(context, getSettings().maxTokens);
         try {
             await context.generate('continue');
         } finally {
+            unhookTokenCap();
             if (restoreAutoContinue && autoContinue.enabled === false) {
                 autoContinue.enabled = true;
             }

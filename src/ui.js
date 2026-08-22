@@ -105,7 +105,7 @@ export function mountBar() {
     directionToggle.setAttribute('aria-controls', 'sbstory-direction-wrap');
     directionToggle.setAttribute('aria-expanded', 'false');
     bar.append(
-        iconButton({ id: 'sbstory-continue', icon: 'fa-feather-pointed', label: 'Continue', title: 'Continue the story from where the text stops. Text in the box is added first.', className: 'menu_button menu_button_icon sbstory-btn sbstory-primary', onClick: onContinue }),
+        iconButton({ id: 'sbstory-continue', icon: 'fa-feather-pointed', label: 'Continue', title: 'Continue the story from where the text stops. Text in the box is added first.', onClick: onContinue }),
         iconButton({ id: 'sbstory-retry', icon: 'fa-arrows-rotate', label: 'Retry', title: 'Redo the last continuation', onClick: () => api.retry() }),
         iconButton({ id: 'sbstory-undo', icon: 'fa-rotate-left', label: 'Undo', title: 'Remove the last continuation', onClick: () => api.undo() }),
         iconButton({ id: 'sbstory-redo', icon: 'fa-rotate-right', label: 'Redo', title: 'Put the last removed continuation back', onClick: () => api.redo() }),
@@ -872,7 +872,16 @@ export function renderDrawer() {
         api.updateSettings({ lengthHint: length.value.trim() || undefined });
         drawerHandlers.onChange?.();
     });
-    content.append(field('How much to write per continuation', length, 'Plain words, e.g. "one paragraph" or "two to four paragraphs".'));
+    content.append(field('How much to write per continuation', length, 'Plain words, e.g. "about a paragraph" or "two short paragraphs".'));
+
+    const cap = el('input', { className: 'text_pole', attrs: { id: 'sbstory-opt-maxtokens', type: 'number', min: '0', step: '10', inputmode: 'numeric' } });
+    cap.value = String(settings.maxTokens);
+    cap.addEventListener('change', () => {
+        const next = api.updateSettings({ maxTokens: cap.value });
+        cap.value = String(next.maxTokens);
+        drawerHandlers.onChange?.();
+    });
+    content.append(field('Longest continuation, in tokens', cap, 'The reply is cut off here, like NovelAI\'s output length; press Continue again to keep going. 0 uses your preset\'s response length.'));
 
     content.append(checkboxRow({
         id: 'sbstory-opt-fullctx',
