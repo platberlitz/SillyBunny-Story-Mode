@@ -273,7 +273,9 @@ body.sbstory #chat .mes .edit_textarea:focus-visible {
     resize: vertical;
 }
 
-#sbstory-settings .sbstory-reset {
+/* The Customize panel forces .menu_button labels to wrap; outrank it so "Reset rules" stays on one line. */
+#sbstory-settings .sbstory-reset,
+#user-settings-block #sbstory-settings .sbstory-reset {
     align-self: flex-start;
     white-space: nowrap;
 }

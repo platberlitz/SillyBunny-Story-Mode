@@ -4,6 +4,14 @@ NovelAI-style co-writing inside SillyBunny: one continuous manuscript that the u
 
 Story Mode is a per-chat mode. Switched on, the chat stops being a row of speech bubbles and reads as one manuscript; **Continue** makes the model pick up exactly where the text stops, mid-sentence if that is where it stops, and each continuation is cut off at a short token limit so it stays a passage rather than a whole reply. The chat *is* the manuscript: every paragraph is still a normal message underneath, so the character card, the lorebook, Author's Note, Summarize and the In-Chat Agent companions keep working without knowing Story Mode exists. Selection rewrites and the direction line borrow from [errata](https://github.com/tealios/errata).
 
+![Story Mode: the chat as one manuscript, with the Continue bar and a direction typed in](screenshots/manuscript.png)
+
+| Editing a paragraph, with the rewrite row under the box | Settings |
+| --- | --- |
+| ![Editing a paragraph with text selected and the Rewrite, Expand, Compress and Custom row](screenshots/editing.png) | ![The Story Mode settings drawer](screenshots/settings.png) |
+
+<img src="screenshots/mobile.png" alt="Story Mode on a phone: one row of controls under the manuscript" width="300">
+
 ## What it does
 
 - Turns the open chat into a continuous manuscript: no avatars, names, timestamps or message boxes, a readable column width, and the text sitting directly on the theme's own chat background.
