@@ -54,13 +54,15 @@ function use(options) {
     return made;
 }
 
-test('settings are normalised, written back and merged on update', () => {
+test('settings are normalised on read without being written back, and merged on update', () => {
     const { context } = use({ extensionSettings: { [SETTINGS_KEY]: { shading: true } } });
     assert.equal(api.getSettings().shading, true);
-    assert.equal(context.extensionSettings[SETTINGS_KEY].rules.length > 10, true);
+    assert.equal(api.getSettings().rules.length > 10, true);
+    assert.deepEqual(context.extensionSettings[SETTINGS_KEY], { shading: true });
     api.updateSettings({ serif: true });
     assert.equal(context.extensionSettings[SETTINGS_KEY].serif, true);
     assert.equal(context.extensionSettings[SETTINGS_KEY].shading, true);
+    assert.equal(context.extensionSettings[SETTINGS_KEY].rules.length > 10, true);
 });
 
 test('the per-chat flag wins over the card default and is saved immediately', async () => {
@@ -155,7 +157,41 @@ test('direction remains active until the owned generation promise settles', asyn
     assert.deepEqual(calls.prompts.at(-1), [PROMPT_DIRECTION_KEY, '', 1, 0, false, 0]);
 });
 
-test('a continuation caps the reply length through the settings-ready events, then unhooks', async () => {
+test('the token cap is armed on GENERATE_AFTER_DATA so requests made by other extensions before ours stay untouched', async () => {
+    const { context } = use({ chat: [{ is_user: false, mes: 'Start' }], extensionSettings: { [SETTINGS_KEY]: { maxTokens: 120 } } });
+    context.eventTypes = { ...context.eventTypes, GENERATE_AFTER_DATA: 'gad' };
+    const fire = (type, ...args) => { for (const handler of [...(context.eventSource.handlers[type] ?? [])]) handler(...args); };
+    let seen = null;
+    context.onGenerate = async () => {
+        const agentBefore = { max_tokens: 800 };
+        fire('ccsr', agentBefore);
+        fire('gad', { max_tokens: 700 }, true);
+        const ours = { max_tokens: 800 };
+        fire('gad', { prompt: [] }, false);
+        fire('ccsr', ours);
+        const agentAfter = { max_tokens: 800 };
+        fire('ccsr', agentAfter);
+        seen = [agentBefore.max_tokens, ours.max_tokens, agentAfter.max_tokens];
+    };
+    assert.equal(await api.continueStory({ hasText: false }), true);
+    assert.deepEqual(seen, [800, 120, 800]);
+    assert.deepEqual([context.eventSource.handlers.gad, context.eventSource.handlers.ccsr], [[], []]);
+
+    seen = null;
+    context.onGenerate = async () => {
+        const agentBefore = { max_new_tokens: 500, max_tokens: 500 };
+        fire('tcsr', agentBefore);
+        const ours = { max_new_tokens: 500, max_tokens: 500, prompt: 'x' };
+        fire('tcsr', ours);
+        fire('gad', ours, false);
+        seen = [agentBefore.max_new_tokens, ours.max_new_tokens, ours.max_tokens];
+    };
+    assert.equal(await api.continueStory({ hasText: false }), true);
+    assert.deepEqual(seen, [500, 120, 120]);
+    assert.deepEqual([context.eventSource.handlers.gad, context.eventSource.handlers.ccsr, context.eventSource.handlers.tcsr], [[], [], undefined]);
+});
+
+test('without GENERATE_AFTER_DATA the cap falls back to the settings-ready events for the whole continuation, then unhooks', async () => {
     const { context, calls } = use({ chat: [{ is_user: false, mes: 'Start' }], extensionSettings: { [SETTINGS_KEY]: { maxTokens: 120 } } });
     let seen = null;
     context.onGenerate = async () => {
@@ -441,6 +477,27 @@ test('an empty Retry keeps the removed tail available to Redo', async () => {
     assert.equal(api.canRedo(), true);
     assert.equal(await api.redo(), true);
     assert.equal(context.chat[0].mes, 'Start, old tail');
+});
+
+test('retry with a draft in the composer parks it, continues the old block, and hands the draft back', async () => {
+    const { context, calls } = use({ chat: [withCuts({ is_user: false, mes: 'Start, old tail' }, [5])] });
+    const composer = { value: 'my draft', events: 0, dispatchEvent() { this.events++; } };
+    globalThis.document = { getElementById: (id) => id === 'send_textarea' ? composer : null };
+    context.onGenerate = async () => {
+        assert.equal(composer.value, '', 'the draft is out of the box while the host continues');
+        context.chat[0].mes += ' new tail';
+    };
+    try {
+        assert.equal(await api.retry(), true);
+    } finally {
+        delete globalThis.document;
+    }
+    assert.equal(context.chat[0].mes, 'Start new tail');
+    assert.equal(context.chat.length, 1, 'the draft was not posted as a block');
+    assert.deepEqual(getCuts(context.chat[0]), [5]);
+    assert.equal(composer.value, 'my draft');
+    assert.equal(composer.events, 2, 'the host is told about both composer changes');
+    assert.deepEqual(calls.generate, ['continue']);
 });
 
 test('retry on a host-made model block swipes, and respects the swipe gate', async () => {

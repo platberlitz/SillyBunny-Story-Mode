@@ -17,8 +17,10 @@ Story Mode is a per-chat mode. Switched on, the chat stops being a row of speech
 - Turns the open chat into a continuous manuscript: no avatars, names, timestamps or message boxes, a readable column width, and the text sitting directly on the theme's own chat background.
 - **Continue** extends the last block, or adds the composer text as a new block first and continues from the end of it. Alt+Enter does the same from the keyboard.
 - Cuts each continuation off at a token limit (160 by default, 0 uses the preset's response length), the way NovelAI's output length works, so the model stops short and the next Continue picks up from there.
-- **Retry** redoes the last continuation, **Undo** removes it, **Redo** puts it back. Cut points are saved with each message and checked against the text, so Undo survives a reload without applying stale offsets to edited text.
+- **Retry** redoes the last continuation, **Undo** removes it, **Redo** puts it back; Alt+R, Alt+Z and Alt+Y from the keyboard. Cut points are saved with each message and checked against the text, so Undo survives a reload without applying stale offsets to edited text.
+- **Export** downloads the manuscript as a plain text file: no speaker names, hidden blocks left out, and a paragraph that stopped mid-sentence runs straight into the next. The bar keeps a running word count next to it.
 - **Direction** takes a one-line instruction that goes to the model for the next continuation only and is cleared afterwards.
+- Holds off the host's bare left and right arrow keys, which otherwise swipe the whole last block away; the on-screen swipe arrows still work.
 - Tap any paragraph to edit it in SillyBunny's own message editor, restyled to look like the page. Escape and the tick both keep the edit.
 - Select text while editing and **Rewrite**, **Expand**, **Compress** or give a **Custom** instruction; the result replaces the selection in place.
 - Optionally shades text the model wrote, including only the model's part of a paragraph the user started.
@@ -31,7 +33,11 @@ Story Mode is a per-chat mode. Switched on, the chat stops being a row of speech
 
 **Continue.** The button above the composer. With text in the box, that text goes in as the next block and the model continues from the end of it; with the box empty, the model extends the last paragraph. Both go through SillyBunny's own Continue, so with Claude and 'Continue prefill' on, a model block is handed back as a prefill and continuations pick up mid-word. The token limit applies only to Story Mode's own continuations, never to the normal send button; press Continue again to keep going.
 
-**Retry, Undo, Redo.** Retry redoes the last continuation, Undo removes it, Redo puts it back. If the last block came from the normal send button, Retry swipes it and Undo deletes it, which is SillyBunny's usual behaviour. The three buttons are disabled when there is nothing for them to do, so a block the user typed cannot be undone by accident. On a phone, or with a narrow chat pane, they shrink to icons and Continue keeps its label.
+**Retry, Undo, Redo.** Retry redoes the last continuation, Undo removes it, Redo puts it back. If the last block came from the normal send button, Retry swipes it and Undo deletes it, which is SillyBunny's usual behaviour. The three buttons are disabled when there is nothing for them to do, so a block the user typed cannot be undone by accident. Retry with a draft sitting in the composer parks the draft, redoes the continuation, then hands the draft back. On a phone, or with a narrow chat pane, the buttons shrink to icons and Continue keeps its label.
+
+**Keys.** Alt+Enter continues, Alt+R retries, Alt+Z undoes, Alt+Y redoes; each does exactly what its button does, including nothing while the button is disabled. Bare ArrowLeft and ArrowRight, which swipe the last block in a normal chat, do nothing while Story Mode is on. The host's other shortcuts (Ctrl+Enter, ArrowUp to edit) are untouched.
+
+**Export and word count.** Export downloads the whole manuscript as `<character> - <date>.txt`: plain text, no `Name:` prefixes, hidden blocks skipped, a block that stopped mid-sentence joined to the next with a space and everything else separated by a blank line. The number beside it is the manuscript's word count, refreshed whenever the chat changes; tokens with no letters or digits (`* * *`, `--`) are not counted.
 
 **Direction.** Opens a one-line box. Whatever is typed there is sent for the next continuation only ('Have the stranger turn out to be her brother'), then cleared. Enter in the box continues; Escape closes it.
 
@@ -81,6 +87,8 @@ For an ensemble, put a 'Narrator' card (world and style) and one card per lead i
 - Rewrites and the custom instruction are one-shot calls without streaming, and the host's Stop button does not reach them; the row has its own Stop.
 - Redo history lives in memory, is forgotten on a chat switch, and is discarded after a divergent edit or generation.
 - `GENERATION_ENDED` does not arrive on the mobile shell, so the bar follows the host's own generating markers instead; the agents allow-list and the token limit rely only on events that fire on every platform.
+- The token limit is armed right before Story Mode's own request goes out, so an agent that makes its own model call earlier in the same Continue keeps its own length. One gap remains: on a text completion backend, an agent that runs a full nested generation at that point takes the limit instead of the continuation.
+- Export reads the message text itself, not what another extension shows in its place (a translation, say).
 
 ## Settings
 

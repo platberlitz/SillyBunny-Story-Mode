@@ -36,6 +36,14 @@
     }
 }
 
+/* Word count and Export sit at the far end of the button row. */
+#sbstory-bar .sbstory-words {
+    margin-left: auto;
+    opacity: 0.7;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
 #sbstory-bar .sbstory-direction-wrap {
     flex-basis: 100%;
     display: flex;

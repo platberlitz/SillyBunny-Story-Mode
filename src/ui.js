@@ -15,6 +15,7 @@ const HINT_KEY = 'SillyBunnyStoryMode_editHintShown';
 let bar = null;
 let directionWrap = null;
 let directionInput = null;
+let wordCount = null;
 let row = null;
 let rowStatus = null;
 let rowStop = null;
@@ -29,6 +30,7 @@ let selectionFrame = 0;
 let transformTextarea = null;
 let listenerController = null;
 let drawerIconObserver = null;
+let drawerRerenderPending = false;
 
 export function el(tag, { className = '', text = '', attrs = {} } = {}) {
     const node = document.createElement(tag);
@@ -104,16 +106,32 @@ export function mountBar() {
     const directionToggle = iconButton({ id: 'sbstory-direction-toggle', icon: 'fa-compass', label: 'Direction', title: 'Tell the model where the next passage should go. Used once.', onClick: toggleDirection });
     directionToggle.setAttribute('aria-controls', 'sbstory-direction-wrap');
     directionToggle.setAttribute('aria-expanded', 'false');
+    wordCount = el('small', { className: 'sbstory-words', attrs: { id: 'sbstory-words', title: 'Words in the manuscript (hidden blocks left out)' } });
     bar.append(
-        iconButton({ id: 'sbstory-continue', icon: 'fa-feather-pointed', label: 'Continue', title: 'Continue the story from where the text stops. Text in the box is added first.', onClick: onContinue }),
-        iconButton({ id: 'sbstory-retry', icon: 'fa-arrows-rotate', label: 'Retry', title: 'Redo the last continuation', onClick: () => api.retry() }),
-        iconButton({ id: 'sbstory-undo', icon: 'fa-rotate-left', label: 'Undo', title: 'Remove the last continuation', onClick: () => api.undo() }),
-        iconButton({ id: 'sbstory-redo', icon: 'fa-rotate-right', label: 'Redo', title: 'Put the last removed continuation back', onClick: () => api.redo() }),
+        iconButton({ id: 'sbstory-continue', icon: 'fa-feather-pointed', label: 'Continue', title: 'Continue the story from where the text stops. Text in the box is added first. (Alt+Enter)', onClick: onContinue }),
+        iconButton({ id: 'sbstory-retry', icon: 'fa-arrows-rotate', label: 'Retry', title: 'Redo the last continuation (Alt+R)', onClick: () => api.retry() }),
+        iconButton({ id: 'sbstory-undo', icon: 'fa-rotate-left', label: 'Undo', title: 'Remove the last continuation (Alt+Z)', onClick: () => api.undo() }),
+        iconButton({ id: 'sbstory-redo', icon: 'fa-rotate-right', label: 'Redo', title: 'Put the last removed continuation back (Alt+Y)', onClick: () => api.redo() }),
         directionToggle,
+        wordCount,
+        iconButton({ id: 'sbstory-export', icon: 'fa-file-arrow-down', label: 'Export', title: 'Download the manuscript as plain text: no speaker names, hidden blocks left out.', onClick: exportManuscript }),
         directionWrap,
     );
     placeBar();
     return bar;
+}
+
+/** Plain-text download of the manuscript; the host has no export without `Name:` prefixes. */
+function exportManuscript() {
+    const { text, fileName } = api.manuscript();
+    if (!text) {
+        api.toast('info', 'Nothing to export yet.');
+        return;
+    }
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
+    const link = el('a', { attrs: { href: url, download: fileName } });
+    link.click();
+    URL.revokeObjectURL(url);
 }
 
 function placeBar() {
@@ -171,13 +189,18 @@ export function setBusy(busy) {
     }
 }
 
-/** Undo/Retry/Redo only light up when the last block can actually be taken back or put back. */
+/** Undo/Retry/Redo only light up when the last block can actually be taken back or put back; the word count follows the chat. */
 export function refreshBar() {
-    if (!bar || bar.hasAttribute('data-busy')) {
+    if (!bar || bar.hidden || bar.hasAttribute('data-busy')) {
         return;
     }
     const revertable = api.canUndo();
-    for (const [id, enabled] of [['sbstory-undo', revertable], ['sbstory-retry', revertable], ['sbstory-redo', api.canRedo()]]) {
+    // ponytail: the whole manuscript is rebuilt on every refresh; cache per block if long chats ever make this noticeable.
+    const { words } = api.manuscript();
+    if (wordCount) {
+        wordCount.textContent = `${words.toLocaleString()} ${words === 1 ? 'word' : 'words'}`;
+    }
+    for (const [id, enabled] of [['sbstory-undo', revertable], ['sbstory-retry', revertable], ['sbstory-redo', api.canRedo()], ['sbstory-export', words > 0]]) {
         const button = document.getElementById(id);
         if (button) {
             button.disabled = !enabled;
@@ -578,8 +601,13 @@ function revealEditor() {
     const notBefore = performance.now() + 260;
     let frame = 0;
     let frames = 0;
+    let done = false;
     const observer = new ResizeObserver(() => arm());
     const reveal = () => {
+        if (done) {
+            return;
+        }
+        done = true;
         observer.disconnect();
         cancelAnimationFrame(frame);
         document.getElementById('curEditTextarea')?.scrollIntoView({ block: 'nearest' });
@@ -602,6 +630,20 @@ function revealEditor() {
     setTimeout(reveal, 1500);
 }
 
+/** Alt+letter runs the matching bar button (physical keys, so the layout does not matter). */
+const HOTKEY_BUTTONS = { KeyR: 'sbstory-retry', KeyZ: 'sbstory-undo', KeyY: 'sbstory-redo' };
+
+/** True while the host swipe keys would fire: nothing focused, or the composer focused and empty. */
+function composerIdle() {
+    const composer = document.getElementById('send_textarea');
+    const focused = document.activeElement;
+    if (composer && String(composer.value) !== '') {
+        return false;
+    }
+    return !focused || focused === document.body || focused === composer;
+}
+
+/** Keyboard layer: Alt+Enter continue, Alt+R/Z/Y, host swipe keys held off, Escape keeps an edit. */
 export function bindEscapeSave() {
     if (document.documentElement.dataset.sbstoryEscape) {
         return;
@@ -609,18 +651,37 @@ export function bindEscapeSave() {
     listenerController ??= new AbortController();
     document.documentElement.dataset.sbstoryEscape = '1';
     document.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' && event.altKey && !event.isComposing && document.body.classList.contains(BODY_CLASS)) {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-            if (!api.isBusy()) {
-                void onContinue();
+        if (event.isComposing || !document.body.classList.contains(BODY_CLASS)) {
+            return;
+        }
+        const popupOpen = Boolean(document.querySelector('dialog[open]'));
+        if (popupOpen) {
+            return;
+        }
+        if (event.altKey && !event.metaKey) {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                if (!api.isBusy()) {
+                    void onContinue();
+                }
+                return;
             }
+            // Ctrl+Alt is how Windows reports AltGr, which international layouts use to type ordinary characters.
+            const buttonId = event.ctrlKey ? null : HOTKEY_BUTTONS[event.code];
+            if (buttonId) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                document.getElementById(buttonId)?.click();
+                return;
+            }
+        }
+        // The host swipes the whole last block on a bare ArrowLeft/ArrowRight; in a manuscript that is a stray keypress away from losing a passage.
+        if ((event.key === 'ArrowLeft' || event.key === 'ArrowRight') && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && composerIdle()) {
+            event.stopImmediatePropagation();
             return;
         }
-        if (event.key !== 'Escape' || event.isComposing) {
-            return;
-        }
-        if (!document.body.classList.contains(BODY_CLASS)) {
+        if (event.key !== 'Escape') {
             return;
         }
         const textarea = document.getElementById('curEditTextarea');
@@ -766,6 +827,20 @@ export function renderDrawer() {
     }
     const content = drawer.querySelector('.inline-drawer-content');
     if (!content) {
+        return;
+    }
+    // Text fields save on change (that is, on blur), so a rebuild under a focused
+    // one would throw away what is being typed. Rebuild once it loses focus instead.
+    const focused = document.activeElement;
+    if (focused instanceof HTMLElement && content.contains(focused) && (focused.tagName === 'TEXTAREA' || (focused.tagName === 'INPUT' && focused.type !== 'checkbox'))) {
+        if (!drawerRerenderPending) {
+            drawerRerenderPending = true;
+            // ponytail: the card textarea saves asynchronously, so a rebuild right after its blur can show the pre-save text until the next rebuild.
+            focused.addEventListener('blur', () => {
+                drawerRerenderPending = false;
+                renderDrawer();
+            }, { once: true });
+        }
         return;
     }
     const settings = api.getSettings();
@@ -984,11 +1059,13 @@ export function unmountAll() {
     bar = null;
     directionWrap = null;
     directionInput = null;
+    wordCount = null;
     row = null;
     rowStatus = null;
     rowStop = null;
     menuItem = null;
     drawer = null;
+    drawerRerenderPending = false;
     pendingSelection = null;
     lastEditorId = null;
 }

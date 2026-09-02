@@ -5,6 +5,7 @@ import {
     DEFAULT_SETTINGS,
     EXTRA_KEY,
     buildDirection,
+    buildManuscript,
     buildRules,
     buildTransformPrompt,
     classifyBlock,
@@ -12,6 +13,7 @@ import {
     clampTokens,
     computeJoins,
     contextWindow,
+    countWords,
     endsMidSentence,
     escapeMacros,
     getCuts,
@@ -86,6 +88,34 @@ test('buildRules fills the length hint and falls back to the default text', () =
     assert.equal(buildRules('   ', { lengthHint: 'x' }), DEFAULT_RULES.replace('{{length}}', 'x'));
     assert.equal(buildRules(undefined, {}), DEFAULT_RULES.replace('{{length}}', DEFAULT_SETTINGS.lengthHint));
     assert.ok(!buildRules(DEFAULT_RULES, {}).includes('{{length}}'));
+});
+
+test('buildManuscript drops names and hidden blocks, joins mid-sentence blocks with a space', () => {
+    const chat = [
+        { name: 'Seraphina', mes: 'The forest breathed.' },
+        { name: 'You', is_user: true, mes: 'I stepped forward and' },
+        { name: 'Seraphina', mes: '  the branches parted.\n' },
+        { name: 'System', is_system: true, mes: 'Hidden note.' },
+        { name: 'You', is_user: true, mes: '   ' },
+        { name: 'Seraphina', mes: '"Welcome," she said.' },
+    ];
+    assert.equal(
+        buildManuscript(chat),
+        'The forest breathed.\n\nI stepped forward and the branches parted.\n\n"Welcome," she said.',
+    );
+    assert.equal(buildManuscript([]), '');
+    assert.equal(buildManuscript(null), '');
+    assert.equal(buildManuscript([{ is_system: true, mes: 'only hidden' }]), '');
+});
+
+test('countWords counts tokens with letters or digits only', () => {
+    assert.equal(countWords('The forest breathed.'), 3);
+    assert.equal(countWords("don't stop, well-known 42"), 4);
+    assert.equal(countWords('* * *\n\n--'), 0);
+    assert.equal(countWords('  \n '), 0);
+    assert.equal(countWords(''), 0);
+    assert.equal(countWords(null), 0);
+    assert.equal(countWords('Ça va très bien'), 4);
 });
 
 test('buildDirection wraps the text, collapses whitespace and neutralises macros', () => {

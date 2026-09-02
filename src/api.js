@@ -10,11 +10,13 @@ import {
     PROMPT_RULES_KEY,
     SETTINGS_KEY,
     buildDirection,
+    buildManuscript,
     buildRules,
     buildTransformPrompt,
     canRevertBlock,
     cleanTransformResult,
     contextWindow,
+    countWords,
     getCuts,
     normalizeSettings,
     resolveEnabled,
@@ -37,13 +39,9 @@ export function toast(kind, message) {
 
 // ---------------------------------------------------------------- settings
 
+/** Read-only: defaults are filled in on the returned copy, never written into settings.json (only updateSettings writes). */
 export function getSettings() {
-    const context = ctx();
-    const settings = normalizeSettings(context.extensionSettings?.[SETTINGS_KEY]);
-    if (context.extensionSettings) {
-        context.extensionSettings[SETTINGS_KEY] = settings;
-    }
-    return settings;
+    return normalizeSettings(ctx().extensionSettings?.[SETTINGS_KEY]);
 }
 
 export function updateSettings(patch) {
@@ -61,6 +59,18 @@ export function updateSettings(patch) {
 export function hasChat() {
     const context = ctx();
     return Boolean(context.chatId) || (Array.isArray(context.chat) && context.chat.length > 0);
+}
+
+/** The chat as plain prose, its word count, and a file name built from the character (or group) and today's date. */
+export function manuscript() {
+    const context = ctx();
+    const text = buildManuscript(context.chat);
+    const who = context.groupId
+        ? context.groups?.find((group) => group?.id === context.groupId)?.name
+        : context.name2;
+    const safeName = String(who || 'Story').replace(/[\\/:*?"<>|]+/gu, '').trim() || 'Story';
+    const date = new Date().toISOString().slice(0, 10);
+    return { text, words: countWords(text), fileName: `${safeName} - ${date}.txt` };
 }
 
 export function getChatFlag() {
@@ -420,20 +430,47 @@ async function locked(action) {
     }
 }
 
+function composer() {
+    return typeof document !== 'undefined' ? document.getElementById?.('send_textarea') ?? null : null;
+}
+
 function composerHasText(fallback) {
-    if (typeof document !== 'undefined') {
-        const textarea = document.getElementById?.('send_textarea');
-        if (textarea) {
-            return String(textarea.value ?? '').length > 0;
-        }
-    }
-    return Boolean(fallback);
+    const textarea = composer();
+    return textarea ? String(textarea.value ?? '').length > 0 : Boolean(fallback);
 }
 
 /**
- * NovelAI-style output length: while the story continuation runs, cap the
- * reply through the host's settings-ready events (chat and text completion)
- * instead of touching the preset. Returns the unhook function.
+ * The host's continue always consumes the composer, so a Retry with a draft in
+ * the box would post the draft as a new block. Park the draft, run, hand it back
+ * (with anything typed meanwhile appended).
+ */
+async function withEmptyComposer(fn) {
+    const textarea = composer();
+    const draft = textarea ? String(textarea.value ?? '') : '';
+    if (!draft) {
+        return fn();
+    }
+    const setValue = (value) => {
+        textarea.value = value;
+        textarea.dispatchEvent?.(new Event('input', { bubbles: true }));
+    };
+    setValue('');
+    try {
+        return await fn();
+    } finally {
+        setValue(draft + String(textarea.value ?? ''));
+    }
+}
+
+/**
+ * NovelAI-style output length: cap the continuation's reply through the host's
+ * generation events instead of touching the preset. Returns the unhook function.
+ *
+ * Other requests can run inside the same Generate before ours (In-Chat Agents
+ * rewrite prompts with their own model calls), so the clamp is armed on
+ * GENERATE_AFTER_DATA, which the host fires once per Generate after those
+ * intercepts and right before the request: text completion already carries its
+ * settings in that payload; chat completion gets them one event later.
  */
 function hookTokenCap(context, maxTokens) {
     const cap = Number(maxTokens);
@@ -443,25 +480,52 @@ function hookTokenCap(context, maxTokens) {
         return () => {};
     }
     const clamp = (value) => Math.min(Number(value) > 0 ? Number(value) : cap, cap);
-    const onChat = (data) => {
+    const clampChat = (data) => {
         if (data && typeof data === 'object') {
             data.max_tokens = clamp(data.max_tokens);
         }
     };
-    const onText = (params) => {
+    const clampText = (params) => {
         if (params && typeof params === 'object') {
             const value = clamp(params.max_new_tokens ?? params.max_tokens);
             params.max_new_tokens = value;
             params.max_tokens = value;
         }
     };
-    const pairs = [[events.CHAT_COMPLETION_SETTINGS_READY, onChat], [events.TEXT_COMPLETION_SETTINGS_READY, onText]].filter(([type]) => type);
-    for (const [type, handler] of pairs) {
-        source.on(type, handler);
+    const listeners = [];
+    const listen = (type, handler) => {
+        if (type) {
+            source.on(type, handler);
+            listeners.push([type, handler]);
+        }
+    };
+    const unlisten = (type, handler) => source.removeListener?.(type, handler);
+    if (events.GENERATE_AFTER_DATA) {
+        // ponytail: a text-completion agent that rewrites the prompt through generateQuietPrompt runs a nested
+        // Generate whose GENERATE_AFTER_DATA arrives first and takes this one-shot; ours then runs uncapped.
+        const onData = (data, dryRun) => {
+            if (dryRun) {
+                return;
+            }
+            unlisten(events.GENERATE_AFTER_DATA, onData);
+            if (data && typeof data === 'object' && ('max_new_tokens' in data || 'max_tokens' in data)) {
+                clampText(data);
+                return;
+            }
+            const once = (payload) => {
+                unlisten(events.CHAT_COMPLETION_SETTINGS_READY, once);
+                clampChat(payload);
+            };
+            listen(events.CHAT_COMPLETION_SETTINGS_READY, once);
+        };
+        listen(events.GENERATE_AFTER_DATA, onData);
+    } else {
+        listen(events.CHAT_COMPLETION_SETTINGS_READY, clampChat);
+        listen(events.TEXT_COMPLETION_SETTINGS_READY, clampText);
     }
     return () => {
-        for (const [type, handler] of pairs) {
-            source.removeListener?.(type, handler);
+        for (const [type, handler] of listeners.splice(0)) {
+            unlisten(type, handler);
         }
     };
 }
@@ -741,26 +805,28 @@ export function retry() {
             return false;
         }
         if (getCuts(message).length) {
-            const removed = await truncateLastContinuation(action);
-            if (!isCurrentChat(action)) {
-                if (removed && String(message.mes ?? '') === removed.prefix) {
+            return withEmptyComposer(async () => {
+                const removed = await truncateLastContinuation(action);
+                if (!isCurrentChat(action)) {
+                    if (removed && String(message.mes ?? '') === removed.prefix) {
+                        redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
+                    }
+                    return false;
+                }
+                if (!removed) {
+                    return false;
+                }
+                const result = await continueUnlocked({ hasText: false, preserveRedo: true });
+                const replacementSucceeded = action.chat[removed.mesid] === message
+                    && String(message.mes ?? '').length > removed.prefix.length
+                    && getCuts(message).includes(removed.cut);
+                if (replacementSucceeded) {
+                    clearRedo();
+                } else if (String(message.mes ?? '') === removed.prefix) {
                     redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
                 }
-                return false;
-            }
-            if (!removed) {
-                return false;
-            }
-            const result = await continueUnlocked({ hasText: false, preserveRedo: true });
-            const replacementSucceeded = action.chat[removed.mesid] === message
-                && String(message.mes ?? '').length > removed.prefix.length
-                && getCuts(message).includes(removed.cut);
-            if (replacementSucceeded) {
-                clearRedo();
-            } else if (String(message.mes ?? '') === removed.prefix) {
-                redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
-            }
-            return result;
+                return result;
+            });
         }
         if (hasCutMetadata(message)) {
             toast('info', 'This block changed since its continuation was recorded, so it cannot be retried safely.');

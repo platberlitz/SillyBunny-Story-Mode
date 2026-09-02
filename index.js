@@ -9,6 +9,7 @@ import { BODY_CLASS, parseStoryArg } from './src/core.js';
 
 const subscriptions = [];
 let active = false;
+let mounted = false;
 let observer = null;
 let busyObserver = null;
 let stampFrame = 0;
@@ -154,6 +155,12 @@ function observeBusy() {
 }
 
 function mountAll() {
+    // APP_READY is sticky (the host replays it to late subscribers), so the
+    // subscription and the direct fallback below both arrive here: mount once.
+    if (mounted) {
+        return;
+    }
+    mounted = true;
     ui.mountBar();
     ui.mountTransformRow();
     ui.bindClickToEdit();
@@ -219,11 +226,15 @@ function start() {
                 scheduleStamp();
             });
         }
-        subscribe(context, events.GENERATION_STARTED, api.onGenerationStarted);
+        subscribe(context, events.GENERATION_STARTED, (type, options, dryRun) => {
+            api.onGenerationStarted(type, options, dryRun);
+            // Agents gate: re-assert before every generation (the user may have flipped an agent in the Agents tab).
+            if (!dryRun) {
+                api.applyAgentGate();
+            }
+        });
         subscribe(context, events.GENERATION_ENDED, api.refreshBusy);
         subscribe(context, events.GENERATION_STOPPED, api.refreshBusy);
-        // Agents gate: re-assert before every generation (the user may have flipped an agent in the Agents tab).
-        subscribe(context, events.GENERATION_STARTED, (_type, _options, dryRun) => { if (!dryRun) api.applyAgentGate(); });
         void api.loadAgentStore().then((store) => {
             if (active && store) {
                 api.applyAgentGate();
@@ -233,12 +244,13 @@ function start() {
         for (const name of ['MORE_MESSAGES_LOADED', 'CHARACTER_MESSAGE_RENDERED', 'USER_MESSAGE_RENDERED']) {
             subscribe(context, events[name], scheduleStamp);
         }
-        // APP_READY is sticky in the host, but enabling after load still needs a direct mount.
+        // Fallback for a host without a sticky APP_READY; mountAll() itself runs once.
         if (document.getElementById('send_form')) {
             mountAll();
         }
     } catch (error) {
         active = false;
+        mounted = false;
         unsubscribeAll();
         observer?.disconnect();
         observer = null;
@@ -252,6 +264,7 @@ function start() {
 
 async function stop() {
     active = false;
+    mounted = false;
     unsubscribeAll();
     observer?.disconnect();
     observer = null;

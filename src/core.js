@@ -176,6 +176,35 @@ export function computeJoins(chat) {
     return joins;
 }
 
+/** The chat as one piece of prose: hidden blocks skipped, no speaker names, a mid-sentence block runs straight into the next. */
+export function buildManuscript(chat) {
+    if (!Array.isArray(chat)) {
+        return '';
+    }
+    let out = '';
+    let previous = null;
+    for (const message of chat) {
+        if (!message || message.is_system) {
+            continue;
+        }
+        const text = String(message.mes ?? '').trim();
+        if (!text) {
+            continue;
+        }
+        if (previous !== null) {
+            out += endsMidSentence(previous) ? ' ' : '\n\n';
+        }
+        out += text;
+        previous = message.mes;
+    }
+    return out;
+}
+
+/** Whitespace-separated tokens that carry at least one letter or digit, so `* * *` and `--` count for nothing. */
+export function countWords(text) {
+    return (String(text ?? '').match(/\S*[\p{L}\p{N}]\S*/gu) ?? []).length;
+}
+
 export function buildRules(template, { lengthHint } = {}) {
     const text = nonEmptyText(template, DEFAULT_RULES);
     return text.replace(/\{\{length\}\}/giu, nonEmptyText(lengthHint, DEFAULT_SETTINGS.lengthHint)).trim();
