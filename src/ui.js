@@ -102,8 +102,10 @@ export function mountBar() {
             document.getElementById('send_textarea')?.focus();
         }
     });
+    directionInput.addEventListener('input', refreshDirectionToggle);
     directionWrap.append(directionInput);
-    const directionToggle = iconButton({ id: 'sbstory-direction-toggle', icon: 'fa-compass', label: 'Direction', title: 'Tell the model where the next passage should go. Used once.', onClick: toggleDirection });
+    // fa-signs-post, not fa-compass: the host's own action row one line below already uses a compass.
+    const directionToggle = iconButton({ id: 'sbstory-direction-toggle', icon: 'fa-signs-post', label: 'Direction', title: 'Tell the model where the next passage should go. Used once.', onClick: toggleDirection });
     directionToggle.setAttribute('aria-controls', 'sbstory-direction-wrap');
     directionToggle.setAttribute('aria-expanded', 'false');
     wordCount = el('small', { className: 'sbstory-words', attrs: { id: 'sbstory-words', title: 'Words in the manuscript (hidden blocks left out)' } });
@@ -162,14 +164,29 @@ function toggleDirection() {
     }
     directionWrap.hidden = !directionWrap.hidden;
     document.getElementById('sbstory-direction-toggle')?.setAttribute('aria-expanded', String(!directionWrap.hidden));
+    refreshDirectionToggle();
     if (!directionWrap.hidden) {
         directionInput.focus();
     }
 }
 
+/** The toggle lights up while a direction is typed but the panel is closed, so an armed Continue is visible. */
+function refreshDirectionToggle() {
+    const toggle = document.getElementById('sbstory-direction-toggle');
+    if (!toggle || !directionWrap || !directionInput) {
+        return;
+    }
+    const armed = directionWrap.hidden && directionInput.value.trim().length > 0;
+    toggle.toggleAttribute('data-set', armed);
+    toggle.title = armed
+        ? `Next Continue is steered: "${directionInput.value.trim()}"`
+        : 'Tell the model where the next passage should go. Used once.';
+}
+
 export function clearDirectionInput(submitted) {
     if (directionInput && (submitted === undefined || directionInput.value.trim() === submitted)) {
         directionInput.value = '';
+        refreshDirectionToggle();
     }
 }
 
@@ -901,32 +918,23 @@ export function renderDrawer() {
         content.append(section);
     }
 
-    content.append(checkboxRow({
-        id: 'sbstory-opt-shading',
-        label: 'Shade the model\'s text',
-        checked: settings.shading,
-        onChange: (value) => {
-            api.updateSettings({ shading: value });
-            drawerHandlers.onChange?.();
-        },
-    }));
-    content.append(checkboxRow({
-        id: 'sbstory-opt-serif',
-        label: 'Serif font in the manuscript',
-        checked: settings.serif,
-        onChange: (value) => {
-            api.updateSettings({ serif: value });
-            drawerHandlers.onChange?.();
-        },
-    }));
+    // Writing: what the model is told and how much it writes. Grouped so the two rules boxes sit together
+    // and the rewrite option is not orphaned after Agents.
+    content.append(el('h4', { text: 'Writing' }));
 
-    const rules = el('textarea', { className: 'text_pole sbstory-textarea', attrs: { id: 'sbstory-opt-rules', rows: '6' } });
+    // When the open card carries its own rules, the general box is not what the model sees: say so on the label.
+    const cardRulesActive = Boolean(character && (card?.instruction ?? '').trim());
+    const rules = el('textarea', { className: `text_pole sbstory-textarea${cardRulesActive ? ' sbstory-muted' : ''}`, attrs: { id: 'sbstory-opt-rules', rows: '6' } });
     rules.value = settings.rules;
     rules.addEventListener('change', () => {
         api.updateSettings({ rules: rules.value.trim() || DEFAULT_RULES });
         drawerHandlers.onChange?.();
     });
-    const rulesField = field('Rules sent before the block being continued', rules, '{{length}} becomes the length hint; {{user}} is the usual macro.');
+    const rulesField = field(
+        cardRulesActive ? 'General rules (not used while this card has its own)' : 'Rules sent before the block being continued',
+        rules,
+        '{{length}} becomes the length hint; {{user}} is the usual macro.',
+    );
     const reset = el('button', { className: 'menu_button sbstory-reset', text: 'Reset rules', attrs: { type: 'button' } });
     reset.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
@@ -957,6 +965,35 @@ export function renderDrawer() {
         drawerHandlers.onChange?.();
     });
     content.append(field('Longest continuation, in tokens', cap, 'The reply is cut off here, like NovelAI\'s output length; press Continue again to keep going. 0 uses your preset\'s response length.'));
+
+    content.append(checkboxRow({
+        id: 'sbstory-opt-fullctx',
+        label: 'Rewrites see the whole story (slower, costs more, matches voice better)',
+        checked: settings.transformsUseFullContext,
+        onChange: (value) => {
+            api.updateSettings({ transformsUseFullContext: value });
+        },
+    }));
+
+    content.append(el('h4', { text: 'Appearance' }));
+    content.append(checkboxRow({
+        id: 'sbstory-opt-shading',
+        label: 'Shade the model\'s text',
+        checked: settings.shading,
+        onChange: (value) => {
+            api.updateSettings({ shading: value });
+            drawerHandlers.onChange?.();
+        },
+    }));
+    content.append(checkboxRow({
+        id: 'sbstory-opt-serif',
+        label: 'Serif font in the manuscript',
+        checked: settings.serif,
+        onChange: (value) => {
+            api.updateSettings({ serif: value });
+            drawerHandlers.onChange?.();
+        },
+    }));
 
     const agentSection = el('div');
     agentSection.append(el('h4', { text: 'In-Chat Agents' }));
@@ -999,15 +1036,6 @@ export function renderDrawer() {
         }
     }
     content.append(agentSection);
-
-    content.append(checkboxRow({
-        id: 'sbstory-opt-fullctx',
-        label: 'Rewrites see the whole story (slower, costs more, matches voice better)',
-        checked: settings.transformsUseFullContext,
-        onChange: (value) => {
-            api.updateSettings({ transformsUseFullContext: value });
-        },
-    }));
 }
 
 // ---------------------------------------------------------------- mode application / teardown

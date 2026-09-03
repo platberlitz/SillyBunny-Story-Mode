@@ -3,6 +3,12 @@
    and the bundled mobile paper theme (≤768px) forces bubbles on `.mes` with !important,
    so the reskin mirrors that specificity and relies on loading later. */
 
+body.sbstory {
+    /* Height of the rewrite row (8px margin, 4px padding twice, one control) plus its 4px sticky offset
+       and a little air: the space kept clear under an edit box so the row can sit there. */
+    --sbstory-row-slot: calc(var(--sb-control-min-height, 38px) + 28px);
+}
+
 /* ---------------------------------------------------------------- story bar (above the composer) */
 
 /* The bar states its own width: themes turn #send_form into a centred column (Moonlit Echoes with
@@ -29,11 +35,35 @@
     white-space: nowrap;
 }
 
-/* Narrow bar (phones, a narrow chat pane): Continue keeps its label, the history buttons go icon-only. */
-@container (width < 36em) {
+/* The bar must stay one row: every extra row comes out of the manuscript. The labelled row measures
+   about 43em at the bar's own font size, so the history buttons go icon-only below 44em (a narrow
+   chat pane, a tablet in portrait); Continue keeps its label because a feather alone says nothing. */
+@container (width < 44em) {
     #sbstory-bar .sbstory-btn:not(#sbstory-continue) .sbstory-btn-label {
         display: none;
     }
+}
+
+/* Phones: Continue plus the four icon buttons fill about 22em, and the count and Export need
+   another 8em that a 390px screen does not have. Both go; the count is decoration and Export is
+   a desktop chore. ponytail: add `/story export` if anyone wants the file on a phone. */
+@container (width < 33em) {
+    #sbstory-bar .sbstory-words,
+    #sbstory-bar #sbstory-export {
+        display: none;
+    }
+}
+
+/* Export is a once-a-session action; icon-only at every width keeps the bar to one row. */
+#sbstory-bar #sbstory-export .sbstory-btn-label {
+    display: none;
+}
+
+/* A typed direction with the panel closed: the toggle takes the same tint as the wand's On pill,
+   so an armed Continue is visible without opening the panel. */
+#sbstory-bar #sbstory-direction-toggle[data-set] {
+    background-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+    border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 45%, transparent);
 }
 
 /* Word count and Export sit at the far end of the button row. */
@@ -96,6 +126,13 @@ body.sbstory #chat .mes:not(.smallSysMes):not(.last_mes) .swipeRightBlock {
     display: none !important;
 }
 
+/* Tapping the text already opens the editor, so the pencil is dead weight on the opening line
+   (on a phone the four icons took ~40% of it). The host binds its click handler on `document`,
+   so the extension's programmatic `.mes_edit.click()` still works while it is hidden. */
+body.sbstory #chat .mes:not(.smallSysMes) .mes_buttons .mes_edit {
+    display: none !important;
+}
+
 body.sbstory #chat .mes:not(.smallSysMes) .mes_block {
     display: flow-root !important;
     margin: 0 !important;
@@ -124,6 +161,14 @@ body.sbstory #chat .mes:not(.smallSysMes) .ch_name {
     border: 0 !important;
     box-shadow: none !important;
     justify-content: flex-end;
+}
+
+/* With the host's "Expand message actions" on, the row is a dozen icons wide and would swallow
+   two-thirds of the opening line (clicks there hit the icon strip, not the prose), so it gets
+   its own line above the paragraph instead. */
+body.sbstory.expandMessageActions #chat .mes:not(.smallSysMes) .ch_name {
+    float: none;
+    width: 100% !important;
 }
 
 /* The text sits directly on the theme's chat background: the Echo/Whisper/... chat styles paint
@@ -221,6 +266,16 @@ body.sbstory #chat .mes .edit_textarea {
     line-height: 1.6 !important;
     color: inherit !important;
     caret-color: var(--color-primary, var(--sb-accent, currentColor));
+    /* revealEditor() scrolls the box to the chat's bottom edge; keep the rewrite row's slot clear
+       under it, or the row sticks up over a short box the moment text is selected. */
+    scroll-margin-bottom: var(--sbstory-row-slot);
+}
+
+/* The slot only exists if there is something to scroll into: while the last block is being edited
+   nothing follows it, so the block itself carries the room. The host's textarea id lifts this above
+   the manuscript padding rule (both !important). */
+body.sbstory #chat .mes.last_mes:has(#curEditTextarea) {
+    padding-bottom: var(--sbstory-row-slot) !important;
 }
 
 body.sbstory #chat .mes .edit_textarea:focus-visible {
@@ -279,6 +334,15 @@ body.sbstory #chat .mes .edit_textarea:focus-visible {
 #sbstory-settings .sbstory-textarea {
     min-height: 90px;
     resize: vertical;
+}
+
+/* General rules while the open card has its own: still editable, visibly not the live set. */
+#sbstory-settings .sbstory-muted {
+    opacity: 0.6;
+}
+
+#sbstory-settings .sbstory-muted:focus {
+    opacity: 1;
 }
 
 /* The Customize panel forces .menu_button labels to wrap; outrank it so "Reset rules" stays on one line. */
