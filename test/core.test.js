@@ -22,6 +22,10 @@ import {
     resolveEnabled,
     textRevision,
     canRevertBlock,
+    isReasoningPayload,
+    estimateTokens,
+    extractReasonings,
+    formatDuration,
 } from '../src/core.js';
 
 function withCuts(message, cuts) {
@@ -221,4 +225,66 @@ test('canRevertBlock allows recorded continuations and plain model blocks only',
     assert.equal(canRevertBlock({ is_user: false, is_system: true, mes: 'hidden' }), false);
     assert.equal(canRevertBlock({ is_user: true, mes: 'edited since', extra: { story_mode: { cuts: [2], revision: 'stale' } } }), false);
     assert.equal(canRevertBlock(null), false);
+});
+
+test('isReasoningPayload identifies reasoning requests across multiple providers and models', () => {
+    assert.equal(isReasoningPayload({ include_reasoning: true }), true);
+    assert.equal(isReasoningPayload({ reasoning_effort: 'low' }), true);
+    assert.equal(isReasoningPayload({ reasoning_effort: 'none' }), false);
+    assert.equal(isReasoningPayload({ thinking: { type: 'enabled', budget_tokens: 1024 } }), true);
+    assert.equal(isReasoningPayload({ max_completion_tokens: 2000 }), true);
+    assert.equal(isReasoningPayload({ model: 'o1-preview' }), true);
+    assert.equal(isReasoningPayload({ model: 'o3-mini' }), true);
+    assert.equal(isReasoningPayload({ model: 'deepseek/deepseek-r1' }), true);
+    assert.equal(isReasoningPayload({ model: 'google/gemini-2.0-flash-thinking-exp' }), true);
+    assert.equal(isReasoningPayload({ model_name: 'kimi-k2-thinking' }), true);
+    assert.equal(isReasoningPayload({ model: 'gpt-4o' }), false);
+    assert.equal(isReasoningPayload({ model: 'claude-3-5-sonnet-20241022' }), false);
+    assert.equal(isReasoningPayload(null), false);
+});
+
+test('estimateTokens calculates token length with context or fallback', () => {
+    assert.equal(estimateTokens('Hello world', { getTokenCount: (t) => t.length * 2 }), 22);
+    assert.equal(estimateTokens('1234567'), 2);
+    assert.equal(estimateTokens(''), 0);
+});
+
+test('extractReasonings extracts host and story mode recorded reasoning', () => {
+    const single = {
+        extra: {
+            reasoning: 'I need to ponder the next scene.',
+            reasoning_duration: 5,
+        },
+    };
+    assert.deepEqual(extractReasonings(single), [
+        { cut: 0, text: 'I need to ponder the next scene.', duration: 5 },
+    ]);
+
+    const accumulated = {
+        extra: {
+            reasoning: 'Latest host thought',
+            [EXTRA_KEY]: {
+                reasonings: [
+                    { cut: 10, text: 'Initial thinking', duration: 3 },
+                    { cut: 25, text: 'Second thinking', duration: 4 },
+                ],
+            },
+        },
+    };
+    assert.deepEqual(extractReasonings(accumulated), [
+        { cut: 10, text: 'Initial thinking', duration: 3 },
+        { cut: 25, text: 'Second thinking', duration: 4 },
+    ]);
+
+    assert.deepEqual(extractReasonings({}), []);
+});
+
+test('formatDuration formats seconds into concise human readable strings', () => {
+    assert.equal(formatDuration(0), '0s');
+    assert.equal(formatDuration(5), '5s');
+    assert.equal(formatDuration(59), '59s');
+    assert.equal(formatDuration(60), '1m');
+    assert.equal(formatDuration(95), '1m 35s');
+    assert.equal(formatDuration(120), '2m');
+    assert.equal(formatDuration('45'), '45s');
 });

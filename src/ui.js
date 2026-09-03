@@ -4,7 +4,7 @@
  * the settings drawer. The manuscript look itself is style.css under body.sbstory.
  */
 import * as api from './api.js';
-import { BODY_CLASS, DEFAULT_RULES, classifyBlock, computeJoins } from './core.js';
+import { BODY_CLASS, DEFAULT_RULES, classifyBlock, computeJoins, formatDuration } from './core.js';
 
 const BAR_ID = 'sbstory-bar';
 const ROW_ID = 'sbstory-transforms';
@@ -462,6 +462,7 @@ export function stampBlocks() {
         } else {
             unwrapTail(mesEl);
         }
+        updateThinkingButton(mesEl, message);
     }
 }
 
@@ -470,6 +471,16 @@ export function cleanupStamps() {
         delete mesEl.dataset.sbstoryOrigin;
         delete mesEl.dataset.sbstoryJoin;
         unwrapTail(mesEl);
+    }
+    for (const btn of document.querySelectorAll('.sbstory-thinking-btn')) {
+        btn.remove();
+    }
+    const dialog = document.getElementById('sbstory-thinking-dialog');
+    if (dialog) {
+        if (typeof dialog.close === 'function') {
+            dialog.close();
+        }
+        dialog.remove();
     }
 }
 
@@ -538,6 +549,175 @@ function wrapTail(mesEl, message, index, cut) {
         span.append(textNode);
     }
     text.dataset.sbstoryWrapped = key;
+}
+
+// ---------------------------------------------------------------- consolidated reasoning dialog & button
+
+export function updateThinkingButton(mesEl, message) {
+    const buttons = mesEl.querySelector('.mes_buttons');
+    if (!buttons) {
+        return;
+    }
+    let btn = buttons.querySelector('.sbstory-thinking-btn');
+    const reasonings = api.getMessageReasonings(message);
+    if (!reasonings || reasonings.length === 0) {
+        btn?.remove();
+        return;
+    }
+    if (!btn) {
+        btn = document.createElement('div');
+        btn.className = 'mes_button sbstory-thinking-btn fa-solid fa-brain';
+        btn.tabIndex = 0;
+        btn.setAttribute('role', 'button');
+        btn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            event.preventDefault();
+            const index = Number(mesEl.getAttribute('mesid'));
+            const msg = api.ctx().chat?.[index] ?? message;
+            openThinkingDialog(msg);
+        });
+        btn.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') {
+                event.preventDefault();
+                btn.click();
+            }
+        });
+        buttons.appendChild(btn);
+    }
+    const count = reasonings.length;
+    const duration = reasonings.reduce((sum, r) => sum + (Number(r.duration) || 0), 0);
+    const timeStr = duration > 0 ? ` (${formatDuration(duration)})` : '';
+    btn.title = count > 1
+        ? `View ${count} reasoning thoughts${timeStr}`
+        : `View reasoning trace${timeStr}`;
+}
+
+export function openThinkingDialog(message) {
+    const reasonings = api.getMessageReasonings(message);
+    if (!reasonings.length) {
+        return;
+    }
+    let dialog = document.getElementById('sbstory-thinking-dialog');
+    if (!dialog) {
+        dialog = document.createElement('dialog');
+        dialog.id = 'sbstory-thinking-dialog';
+        dialog.className = 'sbstory-dialog';
+        dialog.addEventListener('click', (event) => {
+            const rect = dialog.getBoundingClientRect();
+            const inDialog = rect.top <= event.clientY && event.clientY <= rect.bottom
+                && rect.left <= event.clientX && event.clientX <= rect.right;
+            if (!inDialog) {
+                dialog.close();
+            }
+        });
+        document.body.appendChild(dialog);
+    }
+
+    dialog.replaceChildren();
+    const content = document.createElement('div');
+    content.className = 'sbstory-dialog-content';
+
+    const header = document.createElement('div');
+    header.className = 'sbstory-dialog-header';
+
+    const titleWrap = document.createElement('div');
+    titleWrap.className = 'sbstory-dialog-title-wrap';
+    const icon = document.createElement('i');
+    icon.className = 'fa-solid fa-brain';
+    const title = document.createElement('h3');
+    title.textContent = 'Reasoning Trace';
+    titleWrap.append(icon, title);
+
+    const actions = document.createElement('div');
+    actions.className = 'sbstory-dialog-header-actions';
+
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'menu_button sbstory-dialog-btn fa-solid fa-copy';
+    copyBtn.title = 'Copy all reasoning';
+    copyBtn.addEventListener('click', async () => {
+        const fullText = reasonings.map((r, i) => {
+            const label = reasonings.length > 1
+                ? `[${i === 0 ? 'Passage 1' : 'Continuation ' + i}${r.duration ? ' - ' + formatDuration(r.duration) : ''}]\n`
+                : '';
+            return `${label}${r.text}`;
+        }).join('\n\n');
+        try {
+            await navigator.clipboard?.writeText(fullText);
+            api.toast('success', 'Reasoning copied to clipboard');
+        } catch {
+            api.toast('error', 'Failed to copy to clipboard');
+        }
+    });
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'menu_button sbstory-dialog-btn fa-solid fa-xmark';
+    closeBtn.title = 'Close';
+    closeBtn.addEventListener('click', () => {
+        if (typeof dialog.close === 'function') {
+            dialog.close();
+        }
+    });
+
+    actions.append(copyBtn, closeBtn);
+    header.append(titleWrap, actions);
+
+    const body = document.createElement('div');
+    body.className = 'sbstory-dialog-body';
+
+    reasonings.forEach((entry, i) => {
+        const entryEl = document.createElement('details');
+        entryEl.className = 'sbstory-thought-entry';
+        entryEl.open = true;
+
+        const summary = document.createElement('summary');
+        summary.className = 'sbstory-thought-summary';
+
+        const label = document.createElement('span');
+        label.className = 'sbstory-thought-label';
+        label.textContent = reasonings.length > 1
+            ? (i === 0 ? 'Passage 1' : `Continuation ${i}`)
+            : 'Thoughts';
+        summary.appendChild(label);
+
+        if (entry.duration) {
+            const dur = document.createElement('span');
+            dur.className = 'sbstory-thought-duration';
+            dur.textContent = formatDuration(entry.duration);
+            summary.appendChild(dur);
+        }
+
+        const stepCopy = document.createElement('button');
+        stepCopy.type = 'button';
+        stepCopy.className = 'sbstory-thought-copy fa-solid fa-copy';
+        stepCopy.title = 'Copy this thought';
+        stepCopy.addEventListener('click', async (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+                await navigator.clipboard?.writeText(entry.text);
+                api.toast('success', 'Thought copied to clipboard');
+            } catch {
+                api.toast('error', 'Failed to copy to clipboard');
+            }
+        });
+        summary.appendChild(stepCopy);
+
+        const textDiv = document.createElement('div');
+        textDiv.className = 'sbstory-thought-text';
+        textDiv.textContent = entry.text;
+
+        entryEl.append(summary, textDiv);
+        body.appendChild(entryEl);
+    });
+
+    content.append(header, body);
+    dialog.appendChild(content);
+
+    if (!dialog.open && typeof dialog.showModal === 'function') {
+        dialog.showModal();
+    }
 }
 
 // ---------------------------------------------------------------- tap to edit, Escape saves

@@ -245,13 +245,83 @@ export const TRANSFORMS = Object.freeze({
 export const TRANSFORM_SYSTEM = 'You are a line editor working inside a manuscript. Change only the passage you are given; '
     + 'the text around it is context and must not be repeated. Reply with the replacement passage only: no preamble, no quotes, no notes.';
 
-export function estimateTokens(text) {
+export function estimateTokens(text, context = null) {
+    if (typeof context?.getTokenCount === 'function') {
+        try {
+            const count = context.getTokenCount(text);
+            if (typeof count === 'number' && !Number.isNaN(count) && count >= 0) {
+                return count;
+            }
+        } catch {
+            // fallback to character estimate
+        }
+    }
     return Math.ceil(String(text ?? '').length / 3.5);
+}
+
+/** Detects whether an API payload or parameters activate reasoning / thinking mode. */
+export function isReasoningPayload(data) {
+    if (!data || typeof data !== 'object') {
+        return false;
+    }
+    if (data.include_reasoning === true) {
+        return true;
+    }
+    if (data.reasoning_effort && data.reasoning_effort !== 'none') {
+        return true;
+    }
+    if (data.thinking && (data.thinking.type === 'enabled' || Number(data.thinking.budget_tokens) > 0 || typeof data.thinking === 'object')) {
+        return true;
+    }
+    if (data.max_completion_tokens !== undefined) {
+        return true;
+    }
+    const model = String(data.model ?? data.model_name ?? '');
+    if (/(?:^|[/:_-])(?:o[134]|gpt-5|deepseek-(?:r1|reasoner)|gemini-2\.[0-9]-flash-thinking|kimi-k2-thinking|thinking)(?:$|[/:_.-])/i.test(model)) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Normalizes reasoning entries from a message or story extra.
+ * Returns an array of { cut, text, duration }.
+ */
+export function extractReasonings(message, extraKey = EXTRA_KEY) {
+    if (!message || typeof message !== 'object') {
+        return [];
+    }
+    const list = message.extra?.[extraKey]?.reasonings;
+    if (Array.isArray(list) && list.length > 0) {
+        return list.map((item, index) => ({
+            cut: typeof item?.cut === 'number' ? item.cut : index,
+            text: String(item?.text ?? '').trim(),
+            duration: typeof item?.duration === 'number' ? item.duration : (Number(item?.duration) || null),
+        })).filter(r => r.text.length > 0);
+    }
+    if (typeof message.extra?.reasoning === 'string' && message.extra.reasoning.trim()) {
+        return [{
+            cut: 0,
+            text: message.extra.reasoning.trim(),
+            duration: typeof message.extra.reasoning_duration === 'number' ? message.extra.reasoning_duration : (Number(message.extra.reasoning_duration) || null),
+        }];
+    }
+    return [];
 }
 
 export function clampTokens(value, min = 64, max = 1024) {
     const number = Number.isFinite(value) ? Math.round(value) : min;
     return Math.min(max, Math.max(min, number));
+}
+
+export function formatDuration(seconds) {
+    const s = Math.round(Number(seconds) || 0);
+    if (s < 60) {
+        return `${s}s`;
+    }
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return rem > 0 ? `${m}m ${rem}s` : `${m}m`;
 }
 
 export function buildTransformPrompt(kind, { before = '', selection = '', after = '', instruction = '' } = {}) {

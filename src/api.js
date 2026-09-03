@@ -17,7 +17,10 @@ import {
     cleanTransformResult,
     contextWindow,
     countWords,
+    estimateTokens,
+    extractReasonings,
     getCuts,
+    isReasoningPayload,
     normalizeSettings,
     resolveEnabled,
     textRevision,
@@ -240,20 +243,26 @@ export function dropCuts(index) {
 }
 
 function setCuts(message, cuts) {
-    let state = null;
     if (cuts.length) {
-        state = { cuts: [...cuts], revision: textRevision(message.mes) };
+        const state = { cuts: [...cuts], revision: textRevision(message.mes) };
         Object.assign(storyExtra(message), state);
-    } else if (message.extra && typeof message.extra === 'object') {
-        delete message.extra[EXTRA_KEY];
+    } else if (message.extra?.[EXTRA_KEY]) {
+        delete message.extra[EXTRA_KEY].cuts;
+        delete message.extra[EXTRA_KEY].revision;
+        if (!message.extra[EXTRA_KEY].reasonings?.length) {
+            delete message.extra[EXTRA_KEY].reasonings;
+        }
+        if (Object.keys(message.extra[EXTRA_KEY]).length === 0) {
+            delete message.extra[EXTRA_KEY];
+        }
     }
     const swipeInfo = Array.isArray(message.swipe_info) && typeof message.swipe_id === 'number'
         ? message.swipe_info[message.swipe_id]
         : null;
     if (swipeInfo && typeof swipeInfo === 'object') {
         swipeInfo.extra ??= {};
-        if (state) {
-            swipeInfo.extra[EXTRA_KEY] = structuredClone(state);
+        if (message.extra?.[EXTRA_KEY]) {
+            swipeInfo.extra[EXTRA_KEY] = structuredClone(message.extra[EXTRA_KEY]);
         } else {
             delete swipeInfo.extra[EXTRA_KEY];
         }
@@ -274,10 +283,62 @@ function sealCuts(message) {
     }
     const cuts = getCuts(message, { ignoreRevision: true });
     if (cuts.length && cuts[cuts.length - 1] >= String(message.mes ?? '').length) {
-        cuts.pop();
+        const pruned = cuts.pop();
+        const reasonings = message.extra[EXTRA_KEY]?.reasonings;
+        if (Array.isArray(reasonings) && reasonings.length > 0) {
+            message.extra[EXTRA_KEY].reasonings = reasonings.filter((r) => r.cut !== pruned);
+        }
     }
     setCuts(message, cuts);
     return true;
+}
+
+export function getMessageReasonings(message) {
+    return extractReasonings(message, EXTRA_KEY);
+}
+
+export function recordContinuationReasoning(message, { cut = 0, prevReasoning = null, prevDuration = null } = {}) {
+    if (!message || typeof message !== 'object') {
+        return;
+    }
+    const current = typeof message.extra?.reasoning === 'string' ? message.extra.reasoning.trim() : '';
+    const hasPrev = typeof prevReasoning === 'string' && Boolean(prevReasoning.trim());
+    if (!current && !hasPrev) {
+        return;
+    }
+    const extra = storyExtra(message);
+    extra.reasonings ??= [];
+
+    if (extra.reasonings.length === 0 && hasPrev) {
+        extra.reasonings.push({
+            cut: 0,
+            text: prevReasoning.trim(),
+            duration: typeof prevDuration === 'number' ? prevDuration : (Number(prevDuration) || null),
+        });
+    }
+
+    if (!current || (current === prevReasoning?.trim() && extra.reasonings.length > 0)) {
+        return;
+    }
+
+    const last = extra.reasonings.at(-1);
+    if (last && last.cut === cut && last.text === current) {
+        return;
+    }
+
+    extra.reasonings.push({
+        cut,
+        text: current,
+        duration: typeof message.extra?.reasoning_duration === 'number' ? message.extra.reasoning_duration : (Number(message.extra?.reasoning_duration) || null),
+    });
+
+    const swipeInfo = Array.isArray(message.swipe_info) && typeof message.swipe_id === 'number'
+        ? message.swipe_info[message.swipe_id]
+        : null;
+    if (swipeInfo && typeof swipeInfo === 'object') {
+        swipeInfo.extra ??= {};
+        swipeInfo.extra[EXTRA_KEY] = structuredClone(extra);
+    }
 }
 
 function hasCutMetadata(message) {
@@ -371,11 +432,21 @@ export function onMessageSent(index) {
     action.expectCut = false;
     action.mesid = id;
     action.message = message;
+    action.cutAtStart = String(message?.mes ?? '').length;
+    action.prevReasoning = message?.extra?.reasoning ?? null;
+    action.prevDuration = message?.extra?.reasoning_duration ?? null;
     pushMessageCut(message);
 }
 
 async function finalize(action) {
     try {
+        if (action.message) {
+            recordContinuationReasoning(action.message, {
+                cut: action.cutAtStart ?? 0,
+                prevReasoning: action.prevReasoning ?? null,
+                prevDuration: action.prevDuration ?? null,
+            });
+        }
         if (inflight === action && isCurrentChat(action) && action.chat[action.mesid] === action.message && sealCuts(action.message)) {
             await action.context.saveChat();
         }
@@ -472,7 +543,7 @@ async function withEmptyComposer(fn) {
  * intercepts and right before the request: text completion already carries its
  * settings in that payload; chat completion gets them one event later.
  */
-function hookTokenCap(context, maxTokens) {
+export function hookTokenCap(context, maxTokens) {
     const cap = Number(maxTokens);
     const events = context.eventTypes;
     const source = context.eventSource;
@@ -480,18 +551,6 @@ function hookTokenCap(context, maxTokens) {
         return () => {};
     }
     const clamp = (value) => Math.min(Number(value) > 0 ? Number(value) : cap, cap);
-    const clampChat = (data) => {
-        if (data && typeof data === 'object') {
-            data.max_tokens = clamp(data.max_tokens);
-        }
-    };
-    const clampText = (params) => {
-        if (params && typeof params === 'object') {
-            const value = clamp(params.max_new_tokens ?? params.max_tokens);
-            params.max_new_tokens = value;
-            params.max_tokens = value;
-        }
-    };
     const listeners = [];
     const listen = (type, handler) => {
         if (type) {
@@ -500,6 +559,56 @@ function hookTokenCap(context, maxTokens) {
         }
     };
     const unlisten = (type, handler) => source.removeListener?.(type, handler);
+
+    let stopTriggered = false;
+    let streamedText = '';
+    const armStreamStop = () => {
+        if (!events.STREAM_TOKEN_RECEIVED) {
+            return;
+        }
+        const onStreamToken = (text) => {
+            if (stopTriggered) {
+                return;
+            }
+            if (typeof text === 'string') {
+                if (streamedText && text.startsWith(streamedText) && text.length > streamedText.length) {
+                    streamedText = text;
+                } else {
+                    streamedText += text;
+                }
+            }
+            if (estimateTokens(streamedText, context) >= cap) {
+                stopTriggered = true;
+                try {
+                    context.stopGeneration?.();
+                } catch (error) {
+                    console.warn('[Story Mode] failed to stop generation at token cap', error);
+                }
+            }
+        };
+        listen(events.STREAM_TOKEN_RECEIVED, onStreamToken);
+    };
+
+    const clampChat = (data) => {
+        if (data && typeof data === 'object') {
+            if (isReasoningPayload(data)) {
+                armStreamStop();
+                return;
+            }
+            data.max_tokens = clamp(data.max_tokens);
+        }
+    };
+    const clampText = (params) => {
+        if (params && typeof params === 'object') {
+            if (isReasoningPayload(params)) {
+                armStreamStop();
+                return;
+            }
+            const value = clamp(params.max_new_tokens ?? params.max_tokens);
+            params.max_new_tokens = value;
+            params.max_tokens = value;
+        }
+    };
     if (events.GENERATE_AFTER_DATA) {
         // ponytail: a text-completion agent that rewrites the prompt through generateQuietPrompt runs a nested
         // Generate whose GENERATE_AFTER_DATA arrives first and takes this one-shot; ours then runs uncapped.
@@ -574,6 +683,9 @@ async function continueUnlocked({ hasText: hasTextHint = false, direction = '', 
         }
         if (!hasText) {
             action.message = chat[last];
+            action.cutAtStart = String(action.message?.mes ?? '').length;
+            action.prevReasoning = action.message?.extra?.reasoning ?? null;
+            action.prevDuration = action.message?.extra?.reasoning_duration ?? null;
             pushMessageCut(action.message);
         }
         started = true;
@@ -683,13 +795,21 @@ async function truncateLastContinuation(action) {
     const tail = text.slice(cut);
     message.mes = text.slice(0, cut);
     syncSwipe(message);
+    let reasoning = null;
+    const reasonings = message.extra?.[EXTRA_KEY]?.reasonings;
+    if (Array.isArray(reasonings) && reasonings.length > 0) {
+        const last = reasonings.at(-1);
+        if (last && last.cut >= cut) {
+            reasoning = reasonings.pop();
+        }
+    }
     setCuts(message, cuts);
     const saving = context.saveChat();
     if (isCurrentChat(action)) {
         await context.updateMessageBlock(index, message);
     }
     await saving;
-    return { mesid: index, cut, tail, prefix: message.mes };
+    return { mesid: index, cut, tail, prefix: message.mes, reasoning };
 }
 
 export function undo() {
@@ -763,6 +883,11 @@ export function redo() {
             const cuts = getCuts(message);
             message.mes = String(message.mes ?? '') + entry.tail;
             syncSwipe(message);
+            if (entry.reasoning) {
+                const extra = storyExtra(message);
+                extra.reasonings ??= [];
+                extra.reasonings.push(entry.reasoning);
+            }
             setCuts(message, [...cuts, entry.cut]);
             const saving = context.saveChat();
             if (isCurrentChat(action)) {

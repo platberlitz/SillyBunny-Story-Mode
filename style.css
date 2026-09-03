@@ -116,6 +116,7 @@ body.sbstory #chat .mes:not(.smallSysMes) .mesAvatarWrapper,
 body.sbstory #chat .mes:not(.smallSysMes) .mes_timer,
 body.sbstory #chat .mes:not(.smallSysMes) .mesIDDisplay,
 body.sbstory #chat .mes:not(.smallSysMes) .tokenCounterDisplay,
+body.sbstory #chat .mes:not(.smallSysMes) .mes_reasoning_details,
 body.sbstory #chat .mes:not(.smallSysMes) .ch_name > .flex-container:first-child {
     display: none !important;
 }
@@ -368,4 +369,153 @@ body.sbstory #chat .mes .edit_textarea:focus-visible {
 #sbstory-menu-item .sbstory-menu-state[data-on] {
     opacity: 1;
     background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+}
+
+/* ---------------------------------------------------------------- consolidated reasoning dialog & button */
+
+body.sbstory #chat .mes .mes_buttons .sbstory-thinking-btn {
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+body.sbstory #chat .mes .mes_buttons .sbstory-thinking-btn:hover {
+    opacity: 1;
+    transform: scale(1.1);
+    color: var(--SmartThemeQuoteColor, #e5a823);
+}
+
+dialog.sbstory-dialog {
+    padding: 0;
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 18%, transparent);
+    border-radius: var(--sb-radius-sm, 12px);
+    background: var(--SmartThemeBlurTintColor, #1e1e24);
+    background: rgb(from var(--SmartThemeBlurTintColor, #1e1e24) r g b);
+    color: var(--SmartThemeBodyColor, #e0e0e0);
+    box-shadow: 0 16px 48px color-mix(in srgb, var(--SmartThemeShadowColor, #000) 55%, transparent);
+    max-width: min(640px, 92vw);
+    width: 600px;
+    max-height: 80vh;
+    overflow: hidden;
+    margin: auto;
+}
+
+dialog.sbstory-dialog::backdrop {
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(2px);
+}
+
+.sbstory-dialog-content {
+    display: flex;
+    flex-direction: column;
+    max-height: 80vh;
+}
+
+.sbstory-dialog-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 18px;
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 12%, transparent);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #e5a823) 8%, transparent);
+}
+
+.sbstory-dialog-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.sbstory-dialog-title-wrap i {
+    font-size: 1.2em;
+    color: var(--SmartThemeQuoteColor, #e5a823);
+}
+
+.sbstory-dialog-title-wrap h3 {
+    margin: 0;
+    font-size: 1.1em;
+    font-weight: 600;
+}
+
+.sbstory-dialog-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sbstory-dialog-btn {
+    cursor: pointer;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    opacity: 0.75;
+    transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.sbstory-dialog-btn:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 12%, transparent);
+}
+
+.sbstory-dialog-body {
+    padding: 16px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.sbstory-thought-entry {
+    border: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 12%, transparent);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 3%, transparent);
+    overflow: hidden;
+}
+
+.sbstory-thought-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    cursor: pointer;
+    font-weight: 600;
+    user-select: none;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 4%, transparent);
+}
+
+.sbstory-thought-duration {
+    font-size: 0.85em;
+    opacity: 0.65;
+    font-variant-numeric: tabular-nums;
+}
+
+.sbstory-thought-copy {
+    margin-left: auto;
+    cursor: pointer;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    opacity: 0.6;
+    padding: 4px 6px;
+    border-radius: 4px;
+    transition: opacity 0.15s ease;
+}
+
+.sbstory-thought-copy:hover {
+    opacity: 1;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 10%, transparent);
+}
+
+.sbstory-thought-text {
+    padding: 12px 14px;
+    font-size: 0.95em;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border-top: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 8%, transparent);
+    max-height: 380px;
+    overflow-y: auto;
+    font-family: inherit;
 }

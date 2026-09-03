@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as api from '../src/api.js';
+import { updateThinkingButton } from '../src/ui.js';
 import { CARD_KEY, CHAT_KEY, DEFAULT_SETTINGS, EXTRA_KEY, PROMPT_DIRECTION_KEY, PROMPT_RULES_KEY, SETTINGS_KEY, getCuts, textRevision } from '../src/core.js';
 
 function makeContext({ chat = [], chatId = 'chat-1', characterId = 0, characters = [{ name: 'Ann', data: { extensions: {} } }], groupId = null, chatMetadata = {}, extensionSettings = {} } = {}) {
@@ -622,4 +623,162 @@ test('the /story command registers once with on/off/toggle', async () => {
     assert.deepEqual(registered[0].unnamedArgumentList[0].enumList, ['on', 'off', 'toggle']);
     assert.equal(await registered[0].callback({}, 'on'), 'ok');
     assert.deepEqual(seen, ['on']);
+});
+
+test('hookTokenCap exempts reasoning payloads from token clamping and caps via stream', async () => {
+    let stopped = false;
+    const handlers = {};
+    const context = {
+        eventTypes: {
+            GENERATE_AFTER_DATA: 'gad',
+            CHAT_COMPLETION_SETTINGS_READY: 'ccsr',
+            STREAM_TOKEN_RECEIVED: 'str',
+        },
+        eventSource: {
+            on(type, handler) { (handlers[type] ??= []).push(handler); },
+            removeListener(type, handler) { handlers[type] = (handlers[type] ?? []).filter((h) => h !== handler); },
+        },
+        stopGeneration() { stopped = true; },
+        getTokenCount: (text) => text.split(/\s+/).filter(Boolean).length,
+    };
+    const fire = (type, ...args) => { for (const handler of [...(handlers[type] ?? [])]) handler(...args); };
+
+    // 1. Non-reasoning payload: clamped
+    const unhook1 = api.hookTokenCap(context, 10);
+    const nonReasoning = { max_tokens: 500, model: 'gpt-4o' };
+    fire('gad', nonReasoning, false);
+    fire('ccsr', nonReasoning);
+    assert.equal(nonReasoning.max_tokens, 10, 'normal payload is clamped to cap');
+    unhook1();
+
+    // 2. Reasoning payload: exempt from clamping, arms stream stopping
+    const unhook2 = api.hookTokenCap(context, 10);
+    const reasoningPayload = { max_tokens: 500, include_reasoning: true, model: 'o3-mini' };
+    fire('gad', reasoningPayload, false);
+    fire('ccsr', reasoningPayload);
+    assert.equal(reasoningPayload.max_tokens, 500, 'reasoning payload is not clamped');
+
+    // 3. Streaming tokens stop generation once cap is reached
+    assert.equal(stopped, false);
+    fire('str', 'one two three four five');
+    assert.equal(stopped, false);
+    fire('str', 'six seven eight nine ten eleven');
+    assert.equal(stopped, true, 'stopGeneration triggered once prose reaches cap');
+    unhook2();
+});
+
+test('continuation records and preserves reasoning traces across continuations, undo, and redo', async () => {
+    const initialMessage = {
+        is_user: false,
+        mes: 'It was a dark and stormy night.',
+        extra: {
+            reasoning: 'Setting the atmosphere.',
+            reasoning_duration: 3,
+        },
+    };
+    const { context } = use({
+        chat: [initialMessage],
+        extensionSettings: { [SETTINGS_KEY]: { maxTokens: 160 } },
+    });
+
+    // Simulate continuation producing text and reasoning
+    context.onGenerate = async () => {
+        const msg = context.chat[0];
+        msg.mes += ' Lightning flashed across the sky.';
+        msg.extra.reasoning = 'Adding dramatic weather element.';
+        msg.extra.reasoning_duration = 2;
+    };
+
+    assert.equal(await api.continueStory({ hasText: false }), true);
+
+    // Message should now have preserved both reasoning traces
+    const msg = context.chat[0];
+    const reasonings = api.getMessageReasonings(msg);
+    assert.equal(reasonings.length, 2);
+    assert.deepEqual(reasonings[0], {
+        cut: 0,
+        text: 'Setting the atmosphere.',
+        duration: 3,
+    });
+    assert.deepEqual(reasonings[1], {
+        cut: 31,
+        text: 'Adding dramatic weather element.',
+        duration: 2,
+    });
+
+    // Undo continuation
+    assert.equal(await api.undo(), true);
+    assert.equal(msg.mes, 'It was a dark and stormy night.');
+    const undoneReasonings = api.getMessageReasonings(msg);
+    assert.equal(undoneReasonings.length, 1);
+    assert.equal(undoneReasonings[0].text, 'Setting the atmosphere.');
+
+    // Redo continuation
+    assert.equal(await api.redo(), true);
+    assert.equal(msg.mes, 'It was a dark and stormy night. Lightning flashed across the sky.');
+    const redoneReasonings = api.getMessageReasonings(msg);
+    assert.equal(redoneReasonings.length, 2);
+    assert.equal(redoneReasonings[1].text, 'Adding dramatic weather element.');
+});
+
+test('updateThinkingButton manages the brain action button based on message reasoning', () => {
+    let buttonAdded = null;
+    let buttonRemoved = false;
+    const mockBtn = {
+        title: '',
+        tabIndex: -1,
+        className: '',
+        setAttribute(k, v) { this[k] = v; },
+        addEventListener() {},
+        remove() { buttonRemoved = true; },
+    };
+    const mockButtons = {
+        querySelector(selector) {
+            if (selector === '.sbstory-thinking-btn') return buttonAdded;
+            return null;
+        },
+        appendChild(child) { buttonAdded = child; },
+    };
+    const mockMesEl = {
+        getAttribute() { return '0'; },
+        querySelector(selector) {
+            if (selector === '.mes_buttons') return mockButtons;
+            return null;
+        },
+    };
+
+    globalThis.document = {
+        createElement(tag) {
+            if (tag === 'div') return { ...mockBtn };
+            return {};
+        },
+    };
+
+    // 1. Message with no reasoning: no button
+    updateThinkingButton(mockMesEl, { extra: {} });
+    assert.equal(buttonAdded, null);
+
+    // 2. Message with 1 reasoning: button added with title
+    updateThinkingButton(mockMesEl, {
+        extra: { reasoning: 'Reflecting on the scene', reasoning_duration: 6 },
+    });
+    assert.notEqual(buttonAdded, null);
+    assert.equal(buttonAdded.title, 'View reasoning trace (6s)');
+
+    // 3. Message with multiple reasonings across continuations
+    updateThinkingButton(mockMesEl, {
+        extra: {
+            story_mode: {
+                reasonings: [
+                    { cut: 0, text: 'Part 1', duration: 4 },
+                    { cut: 50, text: 'Part 2', duration: 8 },
+                ],
+            },
+        },
+    });
+    assert.equal(buttonAdded.title, 'View 2 reasoning thoughts (12s)');
+
+    // 4. Message reasoning cleared: button removed
+    updateThinkingButton(mockMesEl, { extra: {} });
+    assert.equal(buttonRemoved, true);
 });
