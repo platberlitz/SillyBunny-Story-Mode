@@ -92,12 +92,24 @@ body.sbstory {
     }
 }
 
-/* Phones: Continue plus the four icon buttons fill about 22em, and the count and Export need
-   another 8em that a 390px screen does not have. Both go; the count is decoration and Export is
-   a desktop chore. ponytail: add `/story export` if anyone wants the file on a phone. */
-@container (width < 33em) {
-    #sbstory-bar .sbstory-words,
+/* Export is a once-a-session action; hide below 28em so word count has ample room on mobile.
+   ponytail: add `/story export` if anyone wants the file on a phone. */
+@container (width < 28em) {
     #sbstory-bar #sbstory-export {
+        display: none;
+    }
+}
+
+/* On very tight mobile widths, drop the "words" suffix to keep the count visible without wrapping. */
+@container (width < 22em) {
+    #sbstory-bar .sbstory-words-unit {
+        display: none;
+    }
+}
+
+/* Under 18em (extreme split screen / ultra narrow), hide the word count to prevent row wrapping. */
+@container (width < 18em) {
+    #sbstory-bar .sbstory-words {
         display: none;
     }
 }
@@ -121,7 +133,7 @@ body.sbstory {
     border-color: color-mix(in srgb, var(--SmartThemeQuoteColor) 55%, transparent) !important;
 }
 
-/* Word count sits at the far end of the button row. */
+/* Word count sits at the far end of the button row, vertically centered with the controls. */
 #sbstory-bar .sbstory-words {
     margin-left: auto;
     opacity: 0.65;
@@ -129,6 +141,9 @@ body.sbstory {
     font-size: 0.85em;
     padding: 0 4px;
     font-variant-numeric: tabular-nums;
+    display: inline-flex;
+    align-items: center;
+    height: var(--sb-composer-action-size, var(--bottomFormBlockSize, 36px));
 }
 
 #sbstory-bar .sbstory-direction-wrap {

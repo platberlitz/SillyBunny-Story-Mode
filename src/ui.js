@@ -215,7 +215,10 @@ export function refreshBar() {
     // ponytail: the whole manuscript is rebuilt on every refresh; cache per block if long chats ever make this noticeable.
     const { words } = api.manuscript();
     if (wordCount) {
-        wordCount.textContent = `${words.toLocaleString()} ${words === 1 ? 'word' : 'words'}`;
+        wordCount.replaceChildren(
+            el('span', { className: 'sbstory-words-num', text: words.toLocaleString() }),
+            el('span', { className: 'sbstory-words-unit', text: ` ${words === 1 ? 'word' : 'words'}` }),
+        );
     }
     for (const [id, enabled] of [['sbstory-undo', revertable], ['sbstory-retry', revertable], ['sbstory-redo', api.canRedo()], ['sbstory-export', words > 0]]) {
         const button = document.getElementById(id);

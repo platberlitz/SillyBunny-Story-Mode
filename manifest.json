@@ -1,7 +1,7 @@
 {
     "display_name": "Story Mode",
     "author": "platberlitz",
-    "version": "0.2.3",
+    "version": "0.2.4",
     "description": "NovelAI-style co-writing: the chat becomes one continuous manuscript you and the model extend together, with tap-to-edit, retry and undo for continuations, selection rewrites, a one-shot direction line, hotkeys, word count and plain-text export.",
     "requires": [],
     "minimum_client_version": "1.7.0",
