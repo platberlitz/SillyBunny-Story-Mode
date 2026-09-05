@@ -5,26 +5,43 @@ import { updateThinkingButton } from '../src/ui.js';
 import { CARD_KEY, CHAT_KEY, DEFAULT_SETTINGS, EXTRA_KEY, PROMPT_DIRECTION_KEY, PROMPT_RULES_KEY, SETTINGS_KEY, getCuts, textRevision } from '../src/core.js';
 
 function makeContext({ chat = [], chatId = 'chat-1', characterId = 0, characters = [{ name: 'Ann', data: { extensions: {} } }], groupId = null, chatMetadata = {}, extensionSettings = {} } = {}) {
-    const calls = { generate: [], prompts: [], updates: [], saveChat: 0, saveChatOptions: [], deleteLast: 0, swipeRight: 0, refresh: 0, added: [], cardWrites: [], raw: null, quiet: null, saveMeta: 0 };
+    const calls = { generate: [], generateOptions: [], prompts: [], updates: [], saveChat: 0, saveChatOptions: [], deleteLast: 0, swipeRight: 0, swipeOptions: [], refresh: 0, added: [], cardWrites: [], raw: null, quiet: null, saveMeta: 0 };
     const context = {
         chat, chatId, characterId, characters, groupId, chatMetadata, extensionSettings,
         onGenerate: null,
+        generationSupportsRequestControls: true,
         rawResult: 'raw result',
         swipeAllowed: true,
         saveSettingsDebounced() {},
-        async saveMetadata() { calls.saveMeta++; },
+        async saveMetadata(options) { assert.deepEqual(options, { throwOnError: true }); calls.saveMeta++; return true; },
         setExtensionPrompt(...args) { calls.prompts.push(args); },
-        async generate(type) { calls.generate.push(type); await context.onGenerate?.(type); },
-        async updateMessageBlock(index, message) { calls.updates.push([index, message.mes]); },
-        async saveChat(options) { calls.saveChat++; calls.saveChatOptions.push(options); },
-        async deleteLastMessage() { calls.deleteLast++; chat.length = Math.max(0, chat.length - 1); },
+        async generate(type, options) { calls.generate.push(type); calls.generateOptions.push(options); api.onGenerationStarted(type, options); await context.onGenerate?.(type, options); },
+        async updateMessageBlock(index, message) { calls.updates.push([index, message.mes]); api.clearRedoIfDiverged(); },
+        async saveChat(options) { calls.saveChat++; calls.saveChatOptions.push(options); return true; },
+        async deleteLastMessage() { calls.deleteLast++; chat.length = Math.max(0, chat.length - 1); api.clearRedoIfDiverged(); },
         addOneMessage(message) { calls.added.push(message); },
         swipe: {
             isAllowed: () => context.swipeAllowed,
+            state: () => 'none',
             async right() { calls.swipeRight++; },
+            async to(event, direction, options) {
+                calls.swipeRight++;
+                calls.swipeOptions.push(options);
+                assert.equal(direction, 'right');
+                const message = options.message;
+                message.swipes ??= [message.mes];
+                message.swipe_info ??= [{ extra: structuredClone(message.extra ?? {}) }];
+                message.swipe_id = options.forceSwipeId;
+                message.mes = '...';
+                api.clearRedoIfDiverged();
+                await context.generate('swipe', options.generationOptions);
+                message.mes = message.mes === '...' ? 'New swipe' : message.mes;
+                message.swipes[message.swipe_id] = message.mes;
+                message.swipe_info[message.swipe_id] = { extra: structuredClone(message.extra ?? {}) };
+            },
             refresh() { calls.refresh++; },
         },
-        async writeExtensionField(id, key, value) { calls.cardWrites.push([id, key, value]); characters[id].data.extensions[key] = value; },
+        async writeExtensionField(id, key, value, options) { assert.deepEqual(options, { throwOnError: true }); calls.cardWrites.push([id, key, value]); characters[id].data.extensions[key] = value; return true; },
         async generateRaw(args) { calls.raw = args; return context.rawResult; },
         async generateQuietPrompt(args) { calls.quiet = args; return 'quiet result'; },
         eventTypes: { CHAT_COMPLETION_SETTINGS_READY: 'ccsr', TEXT_COMPLETION_SETTINGS_READY: 'tcsr' },
@@ -50,10 +67,30 @@ globalThis.SillyTavern = { getContext: () => current };
 function use(options) {
     const made = makeContext(options);
     current = made.context;
+    api.setHooks({ afterGeneration: null, beforeGeneration: null, busyChanged: null });
+    api.setTransformBusy(false);
     api.resetInflight();
-    api.clearRedo();
+    api.clearRedo({ discardFailures: true });
     return made;
 }
+
+test('intentional Stop is not an error and keeps accepted partial prose', async (t) => {
+    const errors = t.mock.method(console, 'error', () => {});
+    for (const suffix of ['', ' A partial passage']) {
+        const { context } = use({ chat: [{ mes: 'Original.', is_user: false }] });
+        let completed;
+        api.setHooks({ afterGeneration: action => { completed = action; } });
+        context.onGenerate = () => {
+            context.chat[0].mes += suffix;
+            throw new DOMException('Stopped', 'AbortError');
+        };
+        assert.equal(await api.continueStory({ direction: 'Keep going' }), Boolean(suffix));
+        assert.equal(context.chat[0].mes, `Original.${suffix}`);
+        assert.equal(completed.error, undefined);
+        assert.equal(api.isBusy(), false);
+    }
+    assert.equal(errors.mock.callCount(), 0);
+});
 
 test('settings are normalised on read without being written back, and merged on update', () => {
     const { context } = use({ extensionSettings: { [SETTINGS_KEY]: { shading: true } } });
@@ -155,76 +192,34 @@ test('direction remains active until the owned generation promise settles', asyn
     release();
     await generation;
     assert.equal(api.isInflight(), false);
-    assert.deepEqual(calls.prompts.at(-1), [PROMPT_DIRECTION_KEY, '', 1, 0, false, 0]);
+    assert.ok(calls.prompts.at(-1)[1].includes('keep me'));
 });
 
-test('the token cap is armed on GENERATE_AFTER_DATA so requests made by other extensions before ours stay untouched', async () => {
-    const { context } = use({ chat: [{ is_user: false, mes: 'Start' }], extensionSettings: { [SETTINGS_KEY]: { maxTokens: 120 } } });
-    context.eventTypes = { ...context.eventTypes, GENERATE_AFTER_DATA: 'gad' };
-    const fire = (type, ...args) => { for (const handler of [...(context.eventSource.handlers[type] ?? [])]) handler(...args); };
-    let seen = null;
-    context.onGenerate = async () => {
-        const agentBefore = { max_tokens: 800 };
-        fire('ccsr', agentBefore);
-        fire('gad', { max_tokens: 700 }, true);
-        const ours = { max_tokens: 800 };
-        fire('gad', { prompt: [] }, false);
-        fire('ccsr', ours);
-        const agentAfter = { max_tokens: 800 };
-        fire('ccsr', agentAfter);
-        seen = [agentBefore.max_tokens, ours.max_tokens, agentAfter.max_tokens];
-    };
-    assert.equal(await api.continueStory({ hasText: false }), true);
-    assert.deepEqual(seen, [800, 120, 800]);
-    assert.deepEqual([context.eventSource.handlers.gad, context.eventSource.handlers.ccsr], [[], []]);
-
-    seen = null;
-    context.onGenerate = async () => {
-        const agentBefore = { max_new_tokens: 500, max_tokens: 500 };
-        fire('tcsr', agentBefore);
-        const ours = { max_new_tokens: 500, max_tokens: 500, prompt: 'x' };
-        fire('tcsr', ours);
-        fire('gad', ours, false);
-        seen = [agentBefore.max_new_tokens, ours.max_new_tokens, ours.max_tokens];
-    };
-    assert.equal(await api.continueStory({ hasText: false }), true);
-    assert.deepEqual(seen, [500, 120, 120]);
-    assert.deepEqual([context.eventSource.handlers.gad, context.eventSource.handlers.ccsr, context.eventSource.handlers.tcsr], [[], [], undefined]);
-});
-
-test('without GENERATE_AFTER_DATA the cap falls back to the settings-ready events for the whole continuation, then unhooks', async () => {
+test('continuations pass request-owned limits, including zero, without installing event interceptors', async () => {
     const { context, calls } = use({ chat: [{ is_user: false, mes: 'Start' }], extensionSettings: { [SETTINGS_KEY]: { maxTokens: 120 } } });
-    let seen = null;
-    context.onGenerate = async () => {
-        const chat = { max_tokens: 800 };
-        const text = { max_new_tokens: 50, max_tokens: 50 };
-        for (const handler of context.eventSource.handlers.ccsr ?? []) handler(chat);
-        for (const handler of context.eventSource.handlers.tcsr ?? []) handler(text);
-        seen = { chat: chat.max_tokens, text: [text.max_new_tokens, text.max_tokens] };
-    };
+    context.onGenerate = async () => { context.chat[0].mes += ' tail'; };
     assert.equal(await api.continueStory({ hasText: false }), true);
-    assert.deepEqual(seen, { chat: 120, text: [50, 50] });
-    assert.deepEqual([context.eventSource.handlers.ccsr, context.eventSource.handlers.tcsr], [[], []]);
-    assert.equal(calls.generate.length, 1);
-
+    assert.deepEqual(calls.generateOptions[0], { suppressAutoContinue: true, suppressUserMessage: false, maxOutputTokens: 120 });
+    assert.deepEqual(context.eventSource.handlers, {});
     api.updateSettings({ maxTokens: 0 });
-    seen = null;
-    context.onGenerate = async () => { seen = { hooked: (context.eventSource.handlers.ccsr ?? []).length }; };
     await api.continueStory({ hasText: false });
-    assert.deepEqual(seen, { hooked: 0 });
+    assert.equal(calls.generateOptions.at(-1).maxOutputTokens, 0);
 });
 
-test('the agents gate switches only the non-allowed agents off, only in a Story Mode chat, and back on afterwards', async () => {
+test('the agents gate filters current runtime choices without mutating stored preferences', async () => {
     const { context } = use({ chat: [{ is_user: false, mes: 'Start' }], chatMetadata: { [CHAT_KEY]: { enabled: true } }, extensionSettings: { [SETTINGS_KEY]: { agentGate: true, allowedAgents: ['keep'] } } });
     const agents = [{ id: 'keep', name: 'Keep', enabled: true }, { id: 'drop', name: 'Drop', enabled: true }, { id: 'off', name: 'Off', enabled: false }];
     const store = {
+        filters: new Map(),
         getAgents: () => [...agents],
-        getEnabledAgents: () => agents.filter((agent) => agent.enabled),
-        setAgentEnabledForScope(agent, enabled) { agent.enabled = enabled; },
+        getEnabledAgents: () => agents.filter((agent) => agent.enabled && store.isAgentRuntimeAllowed(agent)),
+        setRuntimeAgentFilter(owner, predicate) { if (predicate) this.filters.set(owner, predicate); else this.filters.delete(owner); },
+        isAgentRuntimeAllowed: (agent) => [...store.filters.values()].every(predicate => predicate(agents.find(current => current.id === agent.id))),
     };
     assert.deepEqual(api.listAgents(store).map((agent) => `${agent.name}:${agent.enabled}`), ['Keep:true', 'Drop:true', 'Off:false']);
     assert.deepEqual(api.applyAgentGate(store), ['drop']);
-    assert.deepEqual(agents.map((agent) => agent.enabled), [true, false, false]);
+    assert.deepEqual(agents.map((agent) => agent.enabled), [true, true, false]);
+    assert.deepEqual(store.getEnabledAgents().map(agent => agent.id), ['keep']);
     assert.deepEqual(api.applyAgentGate(store), ['drop'], 'applying again keeps the same hold');
     api.updateSettings({ allowedAgents: ['keep', 'drop'] });
     assert.deepEqual(api.applyAgentGate(store), [], 'a newly allowed agent is released');
@@ -241,17 +236,18 @@ test('the agents gate switches only the non-allowed agents off, only in a Story 
     assert.deepEqual(api.applyAgentGate(store), [], 'the setting off releases the hold');
     api.updateSettings({ agentGate: true });
     api.applyAgentGate(store);
-    assert.equal(api.releaseAgentGate(store), 1);
+    api.releaseAgentGate(store);
     assert.deepEqual(agents.map((agent) => agent.enabled), [true, true, false]);
-    assert.equal(api.releaseAgentGate(store), 0);
+    api.releaseAgentGate(store);
+    assert.equal(store.filters.size, 0);
     assert.equal(api.listAgents(null), null);
 });
 
-test('Story continuation pauses host Auto-continue and restores it afterwards', async () => {
+test('Story continuation leaves global Auto-continue untouched', async () => {
     const { context } = use({ chat: [{ is_user: false, mes: 'Start', extra: {} }] });
     context.powerUserSettings = { auto_continue: { enabled: true } };
     context.onGenerate = async () => {
-        assert.equal(context.powerUserSettings.auto_continue.enabled, false);
+        assert.equal(context.powerUserSettings.auto_continue.enabled, true);
         context.chat[0].mes += ' once';
     };
     assert.equal(await api.continueStory(), true);
@@ -318,6 +314,18 @@ test('a continuation that finishes after a chat switch cannot seal or save the o
     assert.deepEqual(getCuts(old.context.chat[0]), []);
     assert.equal(old.calls.saveChat, 0);
     assert.equal(next.calls.saveChat, 0);
+});
+
+test('a chat switch during save cannot report success or clear the new chat direction', async () => {
+    const old = use({ chat: [{ is_user: false, mes: 'Old' }] });
+    const next = makeContext({ chatId: 'chat-2', chat: [{ mes: 'New' }] });
+    let finished;
+    api.setHooks({ afterGeneration: action => { finished = action; } });
+    old.context.onGenerate = async () => { old.context.chat[0].mes += ' tail'; };
+    old.context.saveChat = async () => { current = next.context; return true; };
+    assert.equal(await api.continueStory({ direction: 'old' }), false);
+    assert.equal(finished.success, false);
+    assert.equal(next.calls.prompts.length, 0);
 });
 
 test('actions abort after closing an editor switches chats', async () => {
@@ -420,7 +428,7 @@ test('undo on a model block without cuts deletes it, saves, and redo puts it bac
     assert.equal(context.chat.length, 1);
     assert.equal(calls.deleteLast, 1);
     assert.equal(calls.saveChat, 1);
-    assert.deepEqual(calls.saveChatOptions[0], { allowShrink: true });
+    assert.deepEqual(calls.saveChatOptions[0], { throwOnError: true, allowShrink: true });
     assert.equal(calls.refresh, 1);
     assert.equal(await api.redo(), true);
     assert.equal(context.chat.length, 2);
@@ -471,21 +479,19 @@ test('retry truncates the last continuation and continues again', async () => {
     assert.deepEqual(calls.generate, ['continue']);
 });
 
-test('an empty Retry keeps the removed tail available to Redo', async () => {
+test('an empty Retry restores the removed tail automatically', async () => {
     const { context } = use({ chat: [withCuts({ is_user: false, mes: 'Start, old tail' }, [5])] });
-    assert.equal(await api.retry(), true);
-    assert.equal(context.chat[0].mes, 'Start');
-    assert.equal(api.canRedo(), true);
-    assert.equal(await api.redo(), true);
+    assert.equal(await api.retry(), false);
     assert.equal(context.chat[0].mes, 'Start, old tail');
 });
 
-test('retry with a draft in the composer parks it, continues the old block, and hands the draft back', async () => {
+test('retry never changes the composer and explicitly suppresses its consumption', async () => {
     const { context, calls } = use({ chat: [withCuts({ is_user: false, mes: 'Start, old tail' }, [5])] });
     const composer = { value: 'my draft', events: 0, dispatchEvent() { this.events++; } };
     globalThis.document = { getElementById: (id) => id === 'send_textarea' ? composer : null };
-    context.onGenerate = async () => {
-        assert.equal(composer.value, '', 'the draft is out of the box while the host continues');
+    context.onGenerate = async (_type, options) => {
+        assert.equal(options.suppressUserMessage, true);
+        assert.equal(composer.value, 'my draft');
         context.chat[0].mes += ' new tail';
     };
     try {
@@ -497,7 +503,7 @@ test('retry with a draft in the composer parks it, continues the old block, and 
     assert.equal(context.chat.length, 1, 'the draft was not posted as a block');
     assert.deepEqual(getCuts(context.chat[0]), [5]);
     assert.equal(composer.value, 'my draft');
-    assert.equal(composer.events, 2, 'the host is told about both composer changes');
+    assert.equal(composer.events, 0, 'the composer was never touched');
     assert.deepEqual(calls.generate, ['continue']);
 });
 
@@ -554,11 +560,13 @@ test('runTransform uses the cheap raw call by default and the full pipeline when
     assert.ok(calls.raw.prompt.includes('Passage to change:\nTHIS'));
     assert.ok(calls.raw.prompt.includes('Text before the passage:\nPara one.\n\nSelect'));
     assert.equal(calls.raw.responseLength, 64);
+    assert.equal(calls.raw.preserveReasoningBudget, true);
     assert.equal(calls.quiet, null);
     api.updateSettings({ transformsUseFullContext: true });
     const viaQuiet = await api.runTransform({ kind: 'expand', value, start, end: start + 4, signal: null });
     assert.equal(viaQuiet, 'quiet result');
     assert.equal(calls.quiet.skipWIAN, true);
+    assert.equal(calls.quiet.preserveReasoningBudget, true);
     assert.ok(calls.quiet.quietPrompt.includes('Expand the passage'));
     api.updateSettings({ transformsUseFullContext: false });
     assert.equal(await api.runTransform({ kind: 'rewrite', value, start: 2, end: 2, signal: null }), '');
@@ -599,6 +607,7 @@ test('concurrent card updates are serialized and merge the latest card value', a
             await new Promise((resolve) => { release = resolve; });
         }
         context.characters[id].data.extensions[key] = value;
+        return true;
     };
     const first = api.setCardConfig({ default: true });
     const second = api.setCardConfig({ instruction: 'Rules' });
@@ -623,48 +632,6 @@ test('the /story command registers once with on/off/toggle', async () => {
     assert.deepEqual(registered[0].unnamedArgumentList[0].enumList, ['on', 'off', 'toggle']);
     assert.equal(await registered[0].callback({}, 'on'), 'ok');
     assert.deepEqual(seen, ['on']);
-});
-
-test('hookTokenCap exempts reasoning payloads from token clamping and caps via stream', async () => {
-    let stopped = false;
-    const handlers = {};
-    const context = {
-        eventTypes: {
-            GENERATE_AFTER_DATA: 'gad',
-            CHAT_COMPLETION_SETTINGS_READY: 'ccsr',
-            STREAM_TOKEN_RECEIVED: 'str',
-        },
-        eventSource: {
-            on(type, handler) { (handlers[type] ??= []).push(handler); },
-            removeListener(type, handler) { handlers[type] = (handlers[type] ?? []).filter((h) => h !== handler); },
-        },
-        stopGeneration() { stopped = true; },
-        getTokenCount: (text) => text.split(/\s+/).filter(Boolean).length,
-    };
-    const fire = (type, ...args) => { for (const handler of [...(handlers[type] ?? [])]) handler(...args); };
-
-    // 1. Non-reasoning payload: clamped
-    const unhook1 = api.hookTokenCap(context, 10);
-    const nonReasoning = { max_tokens: 500, model: 'gpt-4o' };
-    fire('gad', nonReasoning, false);
-    fire('ccsr', nonReasoning);
-    assert.equal(nonReasoning.max_tokens, 10, 'normal payload is clamped to cap');
-    unhook1();
-
-    // 2. Reasoning payload: exempt from clamping, arms stream stopping
-    const unhook2 = api.hookTokenCap(context, 10);
-    const reasoningPayload = { max_tokens: 500, include_reasoning: true, model: 'o3-mini' };
-    fire('gad', reasoningPayload, false);
-    fire('ccsr', reasoningPayload);
-    assert.equal(reasoningPayload.max_tokens, 500, 'reasoning payload is not clamped');
-
-    // 3. Streaming tokens stop generation once cap is reached
-    assert.equal(stopped, false);
-    fire('str', 'one two three four five');
-    assert.equal(stopped, false);
-    fire('str', 'six seven eight nine ten eleven');
-    assert.equal(stopped, true, 'stopGeneration triggered once prose reaches cap');
-    unhook2();
 });
 
 test('continuation records and preserves reasoning traces across continuations, undo, and redo', async () => {
@@ -749,7 +716,7 @@ test('updateThinkingButton manages the brain action button based on message reas
 
     globalThis.document = {
         createElement(tag) {
-            if (tag === 'div') return { ...mockBtn };
+            if (tag === 'button') return { ...mockBtn };
             return {};
         },
     };
@@ -760,18 +727,19 @@ test('updateThinkingButton manages the brain action button based on message reas
 
     // 2. Message with 1 reasoning: button added with title
     updateThinkingButton(mockMesEl, {
-        extra: { reasoning: 'Reflecting on the scene', reasoning_duration: 6 },
+        extra: { reasoning: 'Reflecting on the scene', reasoning_duration: 6000 },
     });
     assert.notEqual(buttonAdded, null);
     assert.equal(buttonAdded.title, 'View reasoning trace (6s)');
+    assert.equal(buttonAdded['aria-label'], buttonAdded.title);
 
     // 3. Message with multiple reasonings across continuations
     updateThinkingButton(mockMesEl, {
         extra: {
             story_mode: {
                 reasonings: [
-                    { cut: 0, text: 'Part 1', duration: 4 },
-                    { cut: 50, text: 'Part 2', duration: 8 },
+                    { cut: 0, text: 'Part 1', duration: 4000 },
+                    { cut: 50, text: 'Part 2', duration: 8000 },
                 ],
             },
         },
@@ -781,4 +749,550 @@ test('updateThinkingButton manages the brain action button based on message reas
     // 4. Message reasoning cleared: button removed
     updateThinkingButton(mockMesEl, { extra: {} });
     assert.equal(buttonRemoved, true);
+    delete globalThis.document;
+});
+
+test('host deletion notifications preserve consecutive Undo C,B and Redo B,C', async () => {
+    const { context } = use({ chat: ['A', 'B', 'C'].map(mes => ({ mes, is_user: false })) });
+    assert.equal(await api.undo(), true);
+    assert.equal(await api.undo(), true);
+    assert.deepEqual(context.chat.map(message => message.mes), ['A']);
+    assert.equal(await api.redo(), true);
+    assert.equal(await api.redo(), true);
+    assert.deepEqual(context.chat.map(message => message.mes), ['A', 'B', 'C']);
+});
+
+test('Redo restores a continuation after its whole model block was also undone', async () => {
+    const { context } = use({ chat: [{ mes: 'A', is_user: true }, { mes: 'B', is_user: false }] });
+    context.onGenerate = async () => { context.chat[1].mes += ' C'; };
+    await api.continueStory();
+    const original = structuredClone(context.chat);
+    assert.equal(await api.undo(), true);
+    assert.equal(await api.undo(), true);
+    assert.equal(await api.redo(), true);
+    assert.equal(await api.redo(), true);
+    assert.deepEqual(context.chat, original);
+});
+
+test('new continuation snapshots round-trip all host metadata and active swipe reasoning twice', async () => {
+    const original = {
+        mes: 'A', is_user: false, gen_started: 10, gen_finished: 20,
+        extra: { reasoning: 'A thought', reasoning_duration: 2500, reasoning_signature: 'A signature', other_extension: { value: 1 } },
+        swipe_id: 0, swipes: ['A', 'Alternative'],
+        swipe_info: [{ extra: { reasoning: 'A thought', reasoning_duration: 2500 } }, { extra: { reasoning: 'Alternative thought' } }],
+    };
+    const { context } = use({ chat: [structuredClone(original)] });
+    const message = context.chat[0];
+    const snapshots = [original];
+    for (const suffix of ['B', 'C']) {
+        context.onGenerate = async () => {
+            message.mes += suffix;
+            message.extra.reasoning = `${suffix} thought`;
+            message.extra.reasoning_duration = 3500;
+            message.extra.reasoning_signature = suffix;
+            message.extra.other_extension.value++;
+            message.gen_finished++;
+        };
+        assert.equal(await api.continueStory(), true);
+        snapshots.push(structuredClone(message));
+    }
+    assert.equal(await api.undo(), true);
+    assert.deepEqual(message, snapshots[1]);
+    assert.equal(await api.undo(), true);
+    assert.deepEqual(message, original);
+    assert.equal(await api.redo(), true);
+    assert.deepEqual(message, snapshots[1]);
+    assert.equal(await api.redo(), true);
+    assert.deepEqual(message, snapshots[2]);
+    assert.equal(message.swipe_info[0].extra.reasoning, 'C thought');
+});
+
+test('accumulated nonstream reasoning records only the new suffix', () => {
+    use();
+    const message = { mes: 'A B', extra: { reasoning: 'Old thought.\nNew thought.', reasoning_duration: 2400 } };
+    api.recordContinuationReasoning(message, { cut: 1, prevReasoning: 'Old thought.', prevDuration: 1400 });
+    assert.deepEqual(api.getMessageReasonings(message).map(reasoning => reasoning.text), ['Old thought.', 'New thought.']);
+    const repeated = { extra: { reasoning: 'Same.Same.' } };
+    api.recordContinuationReasoning(repeated, { cut: 1, prevReasoning: 'Same.' });
+    assert.deepEqual(api.getMessageReasonings(repeated).map(reasoning => reasoning.text), ['Same.', 'Same.']);
+});
+
+test('host prefix whitespace changes restore exact original text instead of sealing a wrong cut', async () => {
+    const original = { mes: '  Original \n', is_user: true, extra: { reasoning: 'Prior', reasoning_duration: 1000 } };
+    const { context, calls } = use({ chat: [structuredClone(original)] });
+    let finished;
+    api.setHooks({ afterGeneration: action => { finished = action; } });
+    context.onGenerate = async () => { context.chat[0].mes = 'Original new passage'; };
+    assert.equal(await api.continueStory({ direction: 'keep this' }), false);
+    assert.deepEqual(context.chat[0], original);
+    assert.equal(finished.success, false);
+    assert.match(finished.error.message, /original text/);
+    assert.ok(calls.prompts.at(-1)[1].includes('keep this'));
+});
+
+test('reasoning-only output is not a successful continuation and leaves no stale cuts', async () => {
+    const original = { mes: 'Original', is_user: false, extra: { story_mode: { reasonings: [{ cut: 0, text: 'Old', duration: 1000 }] } } };
+    const { context, calls } = use({ chat: [structuredClone(original)] });
+    let finished;
+    api.setHooks({ afterGeneration: action => { finished = action; } });
+    context.onGenerate = async () => { context.chat[0].extra.reasoning = 'No prose, only thinking'; };
+    assert.equal(await api.continueStory({ direction: 'keep direction' }), false);
+    assert.deepEqual(context.chat[0], original);
+    assert.equal(finished.success, false);
+    assert.ok(calls.prompts.at(-1)[1].includes('keep direction'));
+    assert.equal(api.canUndo(), true);
+    assert.equal(await api.undo(), true);
+});
+
+test('Retry ignores text typed while the truncation save is pending', async () => {
+    const { context, calls } = use({ chat: [withCuts({ mes: 'A old', is_user: false }, [1])] });
+    const composer = { value: '' };
+    globalThis.document = { getElementById: id => id === 'send_textarea' ? composer : null };
+    const save = context.saveChat;
+    context.saveChat = async options => {
+        if (calls.saveChat === 0) composer.value = 'typed during save';
+        return save(options);
+    };
+    context.onGenerate = async (_type, options) => {
+        assert.equal(options.suppressUserMessage, true);
+        assert.equal(composer.value, 'typed during save');
+        context.chat[0].mes += ' replacement';
+    };
+    try {
+        assert.equal(await api.retry(), true);
+        assert.equal(context.chat[0].mes, 'A replacement');
+        assert.equal(composer.value, 'typed during save');
+        assert.equal(context.chat.length, 1);
+    } finally {
+        delete globalThis.document;
+    }
+});
+
+test('Retry failure restores its removed tail including original reasoning', async () => {
+    const original = withCuts({ mes: 'A old', is_user: false, extra: { reasoning: 'old thought', reasoning_duration: 1234 } }, [1]);
+    const { context } = use({ chat: [structuredClone(original)] });
+    context.onGenerate = async () => { throw new Error('request failed'); };
+    assert.equal(await api.retry(), false);
+    assert.deepEqual(context.chat[0], original);
+});
+
+test('Retry refuses a target changed during its save without consuming the composer or changing a new block', async () => {
+    const { context, calls } = use({ chat: [withCuts({ mes: 'A old', is_user: false }, [1])] });
+    const save = context.saveChat;
+    context.saveChat = async options => {
+        const result = await save(options);
+        context.chat.push({ mes: 'Unrelated new block', is_user: true });
+        return result;
+    };
+    assert.equal(await api.retry(), false);
+    assert.equal(calls.generate.length, 0);
+    assert.equal(context.chat[1].mes, 'Unrelated new block');
+});
+
+test('strict mutation saves roll back and retain recovery on rejection or refusal', async t => {
+    for (const operation of ['undo tail', 'undo message', 'redo tail', 'redo message', 'continue', 'retry truncate', 'retry replace', 'retry restore', 'swipe']) {
+        await t.test(operation, async () => {
+            const plain = operation.includes('message') || operation === 'swipe';
+            const { context } = use({ chat: [plain ? { mes: 'A old', is_user: false } : withCuts({ mes: 'A old', is_user: false }, [1])] });
+            if (operation.startsWith('redo')) await api.undo();
+            const before = structuredClone(context.chat);
+            let attempts = 0;
+            const failAt = ['retry replace', 'retry restore'].includes(operation) ? 2 : 1;
+            context.saveChat = async options => {
+                assert.equal(options.throwOnError, true);
+                attempts++;
+                if (attempts === failAt) {
+                    assert.equal(api.canRedo(), true, 'recovery exists before the save yields');
+                    if (operation === 'continue') return false;
+                    throw new Error(`save rejected: ${operation}`);
+                }
+                return true;
+            };
+            if (operation !== 'retry restore') context.onGenerate = async () => { context.chat.at(-1).mes += ' new'; };
+            const result = operation.startsWith('undo') ? await api.undo()
+                : operation.startsWith('redo') ? await api.redo()
+                    : operation === 'continue' ? await api.continueStory({ direction: 'keep' }) : await api.retry();
+            assert.equal(result, false);
+            assert.deepEqual(context.chat, before);
+            assert.equal(api.canRedo(), true);
+            assert.equal(api.isBusy(), false);
+            assert.equal(await api.redo(), true, 'recovery remains usable after the save service recovers');
+        });
+    }
+});
+
+test('Undo rolls back even when the host deletion notification rejects', async () => {
+    const original = { mes: 'B', is_user: false };
+    const { context } = use({ chat: [{ mes: 'A' }, original] });
+    context.deleteLastMessage = async () => {
+        context.chat.pop();
+        api.clearRedoIfDiverged();
+        throw new Error('notification failed');
+    };
+    assert.equal(await api.undo(), false);
+    assert.equal(context.chat[1], original);
+    assert.equal(api.canRedo(), true);
+});
+
+test('whole-block Retry requests a fresh controlled swipe and preserves every prior swipe', async () => {
+    const { context, calls } = use({ chat: [{ mes: 'A', is_user: false, swipe_id: 0, swipes: ['A', 'B'], swipe_info: [{ extra: { reasoning: 'A thought' } }, { extra: { reasoning: 'B thought' } }] }] });
+    assert.equal(await api.retry(), true);
+    assert.deepEqual(context.chat[0].swipes, ['A', 'B', 'New swipe']);
+    assert.equal(calls.swipeOptions[0].forceSwipeId, 2);
+    assert.deepEqual(calls.generateOptions[0], { suppressAutoContinue: true, suppressUserMessage: true, maxOutputTokens: DEFAULT_SETTINGS.maxTokens });
+});
+
+test('whole-block Retry restores no-output swipes and replaces rather than inherits old reasoning traces', async () => {
+    const original = { mes: 'A', is_user: false, extra: { story_mode: { reasonings: [{ cut: 0, text: 'Old thought' }] } } };
+    const { context } = use({ chat: [structuredClone(original)] });
+    const swipe = context.swipe.to;
+    context.swipe.to = async (_event, _direction, options) => {
+        options.message.swipe_id = 1;
+        options.message.mes = '...';
+    };
+    assert.equal(await api.retry(), false);
+    assert.deepEqual(context.chat[0], original);
+    context.swipe.to = swipe;
+    context.onGenerate = async () => { context.chat[0].extra.reasoning = 'New thought'; };
+    assert.equal(await api.retry(), true);
+    assert.deepEqual(api.getMessageReasonings(context.chat[0]).map(reasoning => reasoning.text), ['New thought']);
+});
+
+test('persistent save failure keeps original text and a recoverable generated snapshot', async () => {
+    const { context } = use({ chat: [{ mes: 'A', is_user: false }] });
+    context.onGenerate = async () => { context.chat[0].mes += ' B'; };
+    context.saveChat = async () => { throw new Error('offline'); };
+    assert.equal(await api.continueStory({ direction: 'keep' }), false);
+    assert.equal(context.chat[0].mes, 'A');
+    assert.equal(api.canRedo(), true);
+    assert.equal(await api.redo(), false);
+    assert.equal(context.chat[0].mes, 'A');
+    assert.equal(api.canRedo(), true);
+    context.saveChat = async () => true;
+    assert.equal(await api.redo(), true);
+    assert.equal(context.chat[0].mes, 'A B');
+});
+
+test('malformed saved continuation snapshots cannot delete or truncate a block', async () => {
+    const message = withCuts({ mes: 'A tail', is_user: false }, [1]);
+    message.extra[EXTRA_KEY].continuations = [{ cut: 1, before: null }];
+    const { context, calls } = use({ chat: [message] });
+    const before = structuredClone(message);
+    assert.equal(await api.undo(), false);
+    assert.equal(await api.retry(), false);
+    assert.deepEqual(context.chat[0], before);
+    assert.equal(calls.saveChat, 0);
+});
+
+test('the exact host swipe state blocks destructive actions and selection rewrites', async () => {
+    const { context, calls } = use({ chat: [withCuts({ mes: 'A tail', is_user: false }, [1])] });
+    context.swipe.state = () => 'swiping';
+    assert.equal(api.isBusy(), true);
+    for (const action of [api.undo, api.redo, api.retry, api.continueStory]) assert.equal(await action(), false);
+    assert.equal(await api.runTransform({ kind: 'rewrite', value: 'A', start: 0, end: 1 }), '');
+    assert.equal(calls.saveChat, 0);
+    assert.equal(calls.generate.length, 0);
+    context.swipe.state = () => 'editing';
+    assert.equal(api.isBusy(), false, 'the editor must still be closable by Story actions');
+});
+
+test('transform reservation blocks Story actions, accepts its own request, and late callbacks cannot unlock a newer request', async () => {
+    const { context } = use({ chat: [{ mes: 'A' }] });
+    const states = [];
+    api.setHooks({ busyChanged: value => states.push(value) });
+    const pending = [];
+    context.generateRaw = () => new Promise(resolve => pending.push(resolve));
+    const controller = new AbortController();
+    api.setTransformBusy(true);
+    assert.equal(await api.undo(), false);
+    const first = api.runTransform({ kind: 'rewrite', value: 'A', start: 0, end: 1, signal: controller.signal });
+    assert.equal(pending.length, 1);
+    controller.abort();
+    api.setTransformBusy(false);
+    api.setTransformBusy(true);
+    const second = api.runTransform({ kind: 'rewrite', value: 'B', start: 0, end: 1 });
+    pending[0]('late');
+    await assert.rejects(first, { name: 'AbortError' });
+    assert.equal(api.isBusy(), true);
+    assert.equal(states.at(-1), true);
+    pending[1]('replacement');
+    assert.equal(await second, 'replacement');
+    assert.equal(api.isBusy(), true, 'only the UI releases its pending reservation');
+    api.setTransformBusy(false);
+    assert.equal(api.isBusy(), false);
+});
+
+test('strict metadata failures restore the exact prior preference', async () => {
+    const { context } = use({ chatMetadata: { [CHAT_KEY]: { enabled: false, other: 1 } } });
+    const previous = context.chatMetadata[CHAT_KEY];
+    context.saveMetadata = async options => { assert.equal(options.throwOnError, true); throw new Error('metadata refused'); };
+    await assert.rejects(api.setChatFlag(true), /metadata refused/);
+    assert.equal(context.chatMetadata[CHAT_KEY], previous);
+    delete context.chatMetadata[CHAT_KEY];
+    context.saveMetadata = async () => false;
+    await assert.rejects(api.setChatFlag(true), /not saved/);
+    assert.equal(Object.hasOwn(context.chatMetadata, CHAT_KEY), false);
+});
+
+test('card writes reject stale displayed and queued identities, and strict failures do not change local rules', async () => {
+    const { context, calls } = use({ characters: [{ avatar: 'A.png', data: { extensions: {} } }, { avatar: 'B.png', data: { extensions: {} } }] });
+    const original = api.currentCharacter();
+    context.characterId = 1;
+    await assert.rejects(api.setCardConfig({ instruction: 'draft A' }, original), /selected character changed/);
+    assert.equal(calls.cardWrites.length, 0);
+    context.characterId = 0;
+    let release;
+    let started;
+    const ready = new Promise(resolve => { started = resolve; });
+    context.writeExtensionField = async (id, key, value, options) => {
+        assert.equal(options.throwOnError, true);
+        calls.cardWrites.push([id, key, value]);
+        started();
+        await new Promise(resolve => { release = resolve; });
+        context.characters[id].data.extensions[key] = value;
+        return true;
+    };
+    const first = api.setCardConfig({ default: true }, original);
+    const queued = api.setCardConfig({ instruction: 'queued draft A' }, original);
+    const rejected = assert.rejects(queued, /selected character changed/);
+    await ready;
+    context.characterId = 1;
+    release();
+    await first;
+    await rejected;
+    assert.equal(calls.cardWrites.length, 1);
+    assert.deepEqual(context.characters[1].data.extensions, {});
+    context.writeExtensionField = async () => { throw new Error('card refused'); };
+    await assert.rejects(api.setCardConfig({ instruction: 'draft B' }), /card refused/);
+    assert.deepEqual(context.characters[1].data.extensions, {});
+});
+
+test('runtime agent predicates re-read settings and scope after queuing without any flag writes', () => {
+    const { context } = use({ chat: [{ mes: 'A' }], chatMetadata: { [CHAT_KEY]: { enabled: true } }, extensionSettings: { [SETTINGS_KEY]: { agentGate: true, allowedAgents: [] } } });
+    let predicate;
+    const agents = [{ id: 'one', enabled: true, enabledChatIds: ['saved-scope'] }];
+    const original = structuredClone(agents);
+    const store = {
+        getAgents: () => agents,
+        setRuntimeAgentFilter(owner, fn) { assert.equal(owner, SETTINGS_KEY); predicate = fn; },
+    };
+    api.applyAgentGate(store);
+    assert.equal(predicate(agents[0]), false);
+    assert.deepEqual(api.listAgents(store).map(agent => [agent.enabled, agent.paused]), [[true, true]]);
+    api.updateSettings({ allowedAgents: ['one'] });
+    assert.equal(predicate(agents[0]), true);
+    api.updateSettings({ allowedAgents: [] });
+    context.chatMetadata = { [CHAT_KEY]: { enabled: false } };
+    assert.equal(predicate(agents[0]), true);
+    assert.deepEqual(agents, original);
+    api.releaseAgentGate(store);
+    assert.equal(predicate, null);
+});
+
+test('persisted cuts stay metadata-only and linear across many continuations and inactive swipe histories', async () => {
+    const prose = 'MANUSCRIPT_TEXT_'.repeat(100);
+    const unchanged = 'UNRELATED_EXTENSION_DATA_'.repeat(500);
+    const { context } = use({ chat: [{
+        mes: prose, is_user: false, swipe_id: 0,
+        swipes: [prose, `${prose}alternative one`, `${prose}alternative two`],
+        extra: { reasoning: 'Initial', reasoning_duration: 1000, unchanged },
+        swipe_info: Array.from({ length: 3 }, () => ({ extra: { reasoning: 'Initial', reasoning_duration: 1000, unchanged } })),
+    }] });
+    for (let swipeId = 0; swipeId < 3; swipeId++) {
+        let message = context.chat[0];
+        message.swipe_id = swipeId;
+        message.mes = message.swipes[swipeId];
+        message.extra = structuredClone(message.swipe_info[swipeId].extra);
+        const original = structuredClone(message);
+        let halfSize;
+        for (let i = 0; i < 30; i++) {
+            context.onGenerate = async () => {
+                message.mes += ` MANUSCRIPT_PASSAGE_${i} ${'prose '.repeat(40)}`;
+                message.extra.reasoning += ` Thought ${i}`;
+                message.extra.reasoning_duration = 2000 + i;
+                message.gen_finished = 100 + i;
+            };
+            assert.equal(await api.continueStory(), true);
+            if (i === 14) halfSize = JSON.stringify(message.extra[EXTRA_KEY].continuations).length;
+        }
+        const history = message.extra[EXTRA_KEY].continuations;
+        const serialised = JSON.stringify(history);
+        assert.equal(history.length, 30);
+        assert.ok(serialised.length < halfSize * 2.2, 'doubling cuts must not quadruple metadata');
+        assert.ok(!serialised.includes('MANUSCRIPT_'), 'no prefix, passage or inactive swipe prose is copied');
+        assert.ok(!serialised.includes('UNRELATED_EXTENSION_DATA_'), 'unchanged extension data is not copied');
+        const inspect = value => {
+            if (!value || typeof value !== 'object') return;
+            assert.equal(Array.isArray(value.continuations), false, 'no nested continuation arrays');
+            for (const key of ['mes', 'swipes', 'swipe_info']) assert.equal(Object.hasOwn(value, key), false);
+            for (const child of Object.values(value)) inspect(child);
+        };
+        history.forEach(inspect);
+        // Exercise loaded JSON, not an in-memory pre-generation snapshot.
+        const completed = JSON.parse(JSON.stringify(message));
+        context.chat[0] = message = structuredClone(completed);
+        api.clearRedo();
+        for (let i = 0; i < 30; i++) assert.equal(await api.undo(), true);
+        assert.deepEqual(message, original);
+        for (let i = 0; i < 30; i++) assert.equal(await api.redo(), true);
+        assert.deepEqual(message, completed);
+    }
+});
+
+test('failed continuation save rolls back only owned values and Redo preserves concurrent metadata and messages', async () => {
+    const { context } = use({ chat: [{
+        mes: 'A', is_user: false, swipe_id: 0, swipes: ['A', 'Alternative'],
+        extra: { reasoning: 'Before', reasoning_duration: 1000, other: { value: 1 } },
+        swipe_info: [{ extra: { reasoning: 'Before' } }, { extra: { reasoning: 'Other' } }],
+    }] });
+    const message = context.chat[0];
+    context.onGenerate = async () => {
+        message.mes += ' B';
+        message.extra.reasoning = 'After';
+        message.extra.other.value = 2;
+    };
+    let saves = 0;
+    context.saveChat = async () => {
+        if (++saves === 1) {
+            message.extra.note = 'written during save';
+            message.extra.other.concurrent = true;
+            message.swipes[1] = 'Edited alternative';
+            message.swipe_info[1].extra.note = 'keep';
+            context.chat.push({ mes: 'Unrelated next block', is_user: true });
+            throw new Error('save refused');
+        }
+        return true;
+    };
+    assert.equal(await api.continueStory(), false);
+    assert.equal(message.mes, 'A');
+    assert.equal(message.extra.reasoning, 'Before');
+    assert.deepEqual(message.extra.other, { value: 1, concurrent: true });
+    assert.equal(message.extra.note, 'written during save');
+    assert.equal(message.swipes[1], 'Edited alternative');
+    assert.equal(message.swipe_info[1].extra.note, 'keep');
+    api.clearRedoIfDiverged();
+    assert.equal(api.canRedo(), true);
+    assert.equal(await api.redo(), true);
+    assert.equal(message.mes, 'A B');
+    assert.equal(message.extra.reasoning, 'After');
+    assert.deepEqual(message.extra.other, { value: 2, concurrent: true });
+    assert.equal(message.extra.note, 'written during save');
+    assert.equal(message.swipes[1], 'Edited alternative');
+    assert.equal(context.chat[1].mes, 'Unrelated next block');
+});
+
+test('failed Undo preserves a concurrent edit outside the removed tail and keeps recovery usable', async () => {
+    const { context } = use({ chat: [withCuts({ mes: 'A tail', is_user: false }, [1])] });
+    const message = context.chat[0];
+    let saves = 0;
+    context.saveChat = async () => {
+        if (++saves === 1) {
+            message.extra.concurrent = 'keep';
+            throw new Error('save refused');
+        }
+        return true;
+    };
+    assert.equal(await api.undo(), false);
+    assert.equal(message.mes, 'A tail');
+    assert.equal(message.extra.concurrent, 'keep');
+    assert.equal(await api.redo(), true);
+    assert.equal(message.extra.concurrent, 'keep');
+    assert.deepEqual(getCuts(message), [1]);
+});
+
+test('failed whole-message Redo never removes a concurrently edited message', async () => {
+    const { context } = use({ chat: [{ mes: 'A', is_user: true }, { mes: 'B', is_user: false }] });
+    await api.undo();
+    context.saveChat = async () => {
+        context.chat[1].mes = 'B edited during save';
+        throw new Error('save refused');
+    };
+    assert.equal(await api.redo(), false);
+    assert.equal(context.chat[1].mes, 'B edited during save');
+    api.clearRedoIfDiverged();
+    context.saveChat = async () => true;
+    assert.equal(await api.redo(), true);
+    assert.equal(context.chat[1].mes, 'B edited during save');
+});
+
+test('failed-save recovery survives chat-change cleanup and a freshly loaded attempted save', async () => {
+    const old = use({ chat: [withCuts({ mes: 'A tail', is_user: false }, [1])] });
+    const next = makeContext({ chatId: 'other', chat: [{ mes: 'Other story' }] });
+    let savedAttempt;
+    old.context.saveChat = async () => {
+        savedAttempt = structuredClone(old.context.chat);
+        current = next.context;
+        api.clearRedo();
+        throw new Error('save response failed after changing chats');
+    };
+    assert.equal(await api.undo(), false);
+    assert.equal(old.context.chat[0].mes, 'A tail');
+    assert.equal(next.calls.saveChat, 0);
+    assert.equal(next.context.chat[0].mes, 'Other story');
+    const reloaded = makeContext({ chat: savedAttempt });
+    current = reloaded.context;
+    api.clearRedo();
+    assert.equal(api.canRedo(), true);
+    assert.equal(await api.redo(), true);
+    assert.equal(reloaded.context.chat[0].mes, 'A tail');
+    assert.equal(reloaded.calls.saveChat, 1);
+});
+
+test('rollback removes newly created generation metadata but retains a concurrent extension field', async () => {
+    const { context } = use({ chat: [{ mes: 'A', is_user: false }] });
+    const message = context.chat[0];
+    context.onGenerate = async () => { message.mes += ' B'; message.extra.reasoning = 'New thought'; };
+    let calls = 0;
+    context.saveChat = async () => {
+        if (++calls === 1) { message.extra.note = 'keep'; throw new Error('offline'); }
+        return true;
+    };
+    assert.equal(await api.continueStory(), false);
+    assert.deepEqual(message, { mes: 'A', is_user: false, extra: { note: 'keep' } });
+    assert.equal(await api.redo(), true);
+    assert.equal(message.mes, 'A B');
+    assert.equal(message.extra.note, 'keep');
+});
+
+test('a concurrent text edit is never rolled back or overwritten by failed-save recovery', async () => {
+    const { context } = use({ chat: [{ mes: 'A', is_user: false }] });
+    context.onGenerate = async () => { context.chat[0].mes += ' B'; };
+    let calls = 0;
+    context.saveChat = async () => {
+        if (++calls === 1) { context.chat[0].mes = 'User replacement'; throw new Error('offline'); }
+        return true;
+    };
+    assert.equal(await api.continueStory(), false);
+    assert.equal(context.chat[0].mes, 'User replacement');
+    api.clearRedoIfDiverged();
+    assert.equal(api.canRedo(), true, 'conflicting recovery is retained, not applied blindly');
+    assert.equal(await api.redo(), false);
+    assert.equal(context.chat[0].mes, 'User replacement');
+});
+
+test('successful recovery is removed even when chat-change cleanup replaces the pending stack', async () => {
+    const old = use({ chat: [withCuts({ mes: 'A tail', is_user: false }, [1])] });
+    old.context.saveChat = async () => { throw new Error('offline'); };
+    assert.equal(await api.undo(), false);
+    old.context.saveChat = async () => {
+        current = makeContext({ chatId: 'other', chat: [{ mes: 'Other' }] }).context;
+        api.clearRedo();
+        return true;
+    };
+    assert.equal(await api.redo(), true);
+    current = old.context;
+    assert.equal(api.canRedo(), false);
+});
+
+test('corrupt compact metadata cannot replace prose or install nested history through a metadata field', async () => {
+    const { context, calls } = use({ chat: [{ mes: 'A', is_user: false }] });
+    context.onGenerate = async () => { context.chat[0].mes += ' B'; };
+    await api.continueStory();
+    const message = context.chat[0];
+    message.extra[EXTRA_KEY].continuations[0].message.fields.push(['mes', 'Wrong text']);
+    const original = structuredClone(message);
+    const saves = calls.saveChat;
+    assert.equal(await api.undo(), false);
+    assert.deepEqual(message, original);
+    assert.equal(calls.saveChat, saves);
 });

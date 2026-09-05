@@ -17,10 +17,8 @@ import {
     cleanTransformResult,
     contextWindow,
     countWords,
-    estimateTokens,
     extractReasonings,
     getCuts,
-    isReasoningPayload,
     normalizeSettings,
     resolveEnabled,
     textRevision,
@@ -88,8 +86,20 @@ export async function setChatFlag(enabled) {
         return false;
     }
     const current = meta[CHAT_KEY] && typeof meta[CHAT_KEY] === 'object' ? meta[CHAT_KEY] : {};
-    meta[CHAT_KEY] = { ...current, enabled: Boolean(enabled) };
-    await context.saveMetadata();
+    const previous = meta[CHAT_KEY];
+    const next = { ...current, enabled: Boolean(enabled) };
+    meta[CHAT_KEY] = next;
+    try {
+        if (await context.saveMetadata({ throwOnError: true }) !== true) {
+            throw new Error('Chat preference was not saved');
+        }
+    } catch (error) {
+        if (meta[CHAT_KEY] === next) {
+            if (previous === undefined) delete meta[CHAT_KEY];
+            else meta[CHAT_KEY] = previous;
+        }
+        throw error;
+    }
     return true;
 }
 
@@ -123,24 +133,30 @@ let cardWrite = Promise.resolve();
  * The host persists card fields with a merge, so a key can only be cleared by
  * writing an explicit empty value: `default: null` means "no preference".
  */
-export async function setCardConfig(patch) {
-    const context = ctx();
-    const character = context.groupId ? null : context.characters?.[context.characterId];
+export async function setCardConfig(patch, character = currentCharacter()) {
     if (!character) {
         return false;
     }
-    const characterId = context.characterId;
+    const avatar = character.avatar;
+    const changes = { ...patch };
     const write = cardWrite.catch(() => {}).then(async () => {
+        const context = ctx();
+        if (currentCharacter() !== character || character.avatar !== avatar) {
+            throw new Error('The selected character changed. Your draft was not saved.');
+        }
+        const characterId = context.characterId;
         const stored = character.data?.extensions?.[CARD_KEY];
         const current = stored && typeof stored === 'object'
             ? { default: typeof stored.default === 'boolean' ? stored.default : undefined, instruction: typeof stored.instruction === 'string' ? stored.instruction : '' }
             : { default: undefined, instruction: '' };
-        const merged = { ...current, ...patch };
+        const merged = { ...current, ...changes };
         const next = {
             default: typeof merged.default === 'boolean' ? merged.default : null,
             instruction: typeof merged.instruction === 'string' ? merged.instruction.trim() : '',
         };
-        await context.writeExtensionField(characterId, CARD_KEY, next);
+        if (await context.writeExtensionField(characterId, CARD_KEY, next, { throwOnError: true }) !== true) {
+            throw new Error('Character preference was not saved');
+        }
         return true;
     });
     cardWrite = write;
@@ -249,6 +265,7 @@ function setCuts(message, cuts) {
     } else if (message.extra?.[EXTRA_KEY]) {
         delete message.extra[EXTRA_KEY].cuts;
         delete message.extra[EXTRA_KEY].revision;
+        delete message.extra[EXTRA_KEY].continuations;
         if (!message.extra[EXTRA_KEY].reasonings?.length) {
             delete message.extra[EXTRA_KEY].reasonings;
         }
@@ -274,23 +291,14 @@ function syncSwipe(message) {
     if (Array.isArray(message.swipes) && message.swipe_id !== undefined && message.swipe_id !== null) {
         message.swipes[message.swipe_id] = message.mes;
     }
-}
-
-/** Seal generated text to its cuts, pruning an empty continuation before persistence. */
-function sealCuts(message) {
-    if (!message?.extra?.[EXTRA_KEY]) {
-        return false;
-    }
-    const cuts = getCuts(message, { ignoreRevision: true });
-    if (cuts.length && cuts[cuts.length - 1] >= String(message.mes ?? '').length) {
-        const pruned = cuts.pop();
-        const reasonings = message.extra[EXTRA_KEY]?.reasonings;
-        if (Array.isArray(reasonings) && reasonings.length > 0) {
-            message.extra[EXTRA_KEY].reasonings = reasonings.filter((r) => r.cut !== pruned);
+    const info = message.swipe_info?.[message.swipe_id];
+    if (info) {
+        info.extra = structuredClone(message.extra ?? {});
+        for (const field of ['send_date', 'gen_started', 'gen_finished']) {
+            if (Object.hasOwn(message, field)) info[field] = message[field];
+            else delete info[field];
         }
     }
-    setCuts(message, cuts);
-    return true;
 }
 
 export function getMessageReasonings(message) {
@@ -301,7 +309,8 @@ export function recordContinuationReasoning(message, { cut = 0, prevReasoning = 
     if (!message || typeof message !== 'object') {
         return;
     }
-    const current = typeof message.extra?.reasoning === 'string' ? message.extra.reasoning.trim() : '';
+    const raw = typeof message.extra?.reasoning === 'string' ? message.extra.reasoning : '';
+    const current = (prevReasoning && raw.startsWith(prevReasoning) ? raw.slice(prevReasoning.length) : raw).trim();
     const hasPrev = typeof prevReasoning === 'string' && Boolean(prevReasoning.trim());
     if (!current && !hasPrev) {
         return;
@@ -317,7 +326,7 @@ export function recordContinuationReasoning(message, { cut = 0, prevReasoning = 
         });
     }
 
-    if (!current || (current === prevReasoning?.trim() && extra.reasonings.length > 0)) {
+    if (!current) {
         return;
     }
 
@@ -342,7 +351,116 @@ export function recordContinuationReasoning(message, { cut = 0, prevReasoning = 
 }
 
 function hasCutMetadata(message) {
-    return Boolean(message?.extra && typeof message.extra === 'object' && Object.hasOwn(message.extra, EXTRA_KEY));
+    const state = message?.extra?.[EXTRA_KEY];
+    return Boolean(state && (Object.hasOwn(state, 'cuts') || Object.hasOwn(state, 'revision')));
+}
+
+function restoreMessage(message, snapshot, expected = message) {
+    for (const key of new Set([...Object.keys(snapshot), ...Object.keys(expected)])) {
+        if (sameMessage(message[key], expected[key])) {
+            if (Object.hasOwn(snapshot, key)) Object.defineProperty(message, key, { value: structuredClone(snapshot[key]), writable: true, enumerable: true, configurable: true });
+            else delete message[key];
+        } else if (Object.hasOwn(message, key) && message[key] && typeof message[key] === 'object'
+            && (snapshot[key] === undefined || (snapshot[key] && typeof snapshot[key] === 'object'))
+            && (expected[key] === undefined || (expected[key] && typeof expected[key] === 'object'))
+            && (!Array.isArray(message[key]) || (Array.isArray(snapshot[key]) && Array.isArray(expected[key])))) {
+            restoreMessage(message[key], snapshot[key] ?? {}, expected[key] ?? {});
+        }
+    }
+    if (Array.isArray(message) && Array.isArray(snapshot)) {
+        while (message.length > snapshot.length && !Object.hasOwn(message, message.length - 1)) message.length--;
+    }
+}
+
+/** Persist changed metadata only. Prose is recovered from the cut; Story arrays retain just their old lengths. */
+function metadataUndo(before = {}, after = {}) {
+    const changes = (old = {}, next = {}, skip = []) => [...new Set([...Object.keys(old), ...Object.keys(next)])]
+        .filter(key => !skip.includes(key) && !sameMessage(old[key], next[key]))
+        .map(key => {
+            // Accumulated reasoning (or display text) already contains its previous value.
+            if (typeof old[key] === 'string' && typeof next[key] === 'string' && next[key].startsWith(old[key])) {
+                return [key, old[key].length, textRevision(old[key])];
+            }
+            return old[key] === undefined ? [key] : [key, structuredClone(old[key])];
+        });
+    const story = before.extra?.[EXTRA_KEY];
+    const arrays = ['cuts', 'reasonings', 'continuations'];
+    return {
+        fields: changes(before, after, ['mes', 'swipes', 'swipe_info', 'extra']),
+        extra: changes(before.extra, after.extra, [EXTRA_KEY]),
+        extraPresent: Object.hasOwn(before, 'extra'),
+        story: story ? {
+            fields: changes(story, after.extra?.[EXTRA_KEY], arrays),
+            lengths: Object.fromEntries(arrays.filter(key => Array.isArray(story[key])).map(key => [key, story[key].length])),
+        } : null,
+    };
+}
+
+function restoreMetadata(message, state) {
+    message.extra ??= {};
+    const story = state.story ? storyExtra(message) : null;
+    for (const [target, changes] of [[message, state.fields], [message.extra, state.extra], [story, state.story?.fields ?? []]]) {
+        if (!Array.isArray(changes)) throw new Error('The continuation metadata is invalid');
+        for (const change of changes) {
+            if (!Array.isArray(change) || change.length < 1 || change.length > 3 || typeof change[0] !== 'string'
+                || ['__proto__', 'prototype', 'constructor'].includes(change[0])
+                || (target === message && ['mes', 'swipes', 'swipe_info', 'extra'].includes(change[0]))
+                || (target === message.extra && change[0] === EXTRA_KEY)
+                || (target === story && ['cuts', 'reasonings', 'continuations'].includes(change[0]))) {
+                throw new Error('The continuation metadata is invalid');
+            }
+            if (change.length === 1) delete target[change[0]];
+            else if (change.length === 3) {
+                const prefix = String(target[change[0]] ?? '').slice(0, change[1]);
+                if (textRevision(prefix) !== change[2]) throw new Error('The continuation metadata changed');
+                target[change[0]] = prefix;
+            } else target[change[0]] = structuredClone(change[1]);
+        }
+    }
+    if (story) {
+        for (const key of ['cuts', 'reasonings', 'continuations']) {
+            if (Object.hasOwn(state.story.lengths, key)) {
+                const length = state.story.lengths[key];
+                if (!Number.isInteger(length) || length < 0 || length > (story[key]?.length ?? 0)) {
+                    throw new Error('The continuation history is invalid');
+                }
+                story[key] = (story[key] ?? []).slice(0, length);
+            } else delete story[key];
+        }
+    } else {
+        delete message.extra[EXTRA_KEY];
+    }
+    if (!state.extraPresent && Object.keys(message.extra).length === 0) delete message.extra;
+}
+
+function sameMessage(message, snapshot) {
+    return JSON.stringify(message) === JSON.stringify(snapshot);
+}
+
+async function saveChat(action, options = {}) {
+    if (!isCurrentChat(action)) throw new Error('The chat changed before it could be saved');
+    if (await action.context.saveChat({ throwOnError: true, ...options }) !== true) {
+        throw new Error('The story was not saved');
+    }
+}
+
+async function saveRollback(action, options = {}) {
+    try {
+        await saveChat(action, options);
+    } catch {
+        // Leave recovery available if the server cannot acknowledge the restored state either.
+    }
+}
+
+async function renderMessage(action, index, message) {
+    if (isCurrentChat(action) && action.chat[index] === message) {
+        try {
+            await action.context.updateMessageBlock(index, message);
+            action.context.swipe?.refresh?.();
+        } catch (error) {
+            console.warn('[Story Mode] could not refresh the restored block', error);
+        }
+    }
 }
 
 // ---------------------------------------------------------------- edit snapshots
@@ -432,28 +550,89 @@ export function onMessageSent(index) {
     action.expectCut = false;
     action.mesid = id;
     action.message = message;
-    action.cutAtStart = String(message?.mes ?? '').length;
-    action.prevReasoning = message?.extra?.reasoning ?? null;
-    action.prevDuration = message?.extra?.reasoning_duration ?? null;
+    action.before = structuredClone(message);
     pushMessageCut(message);
 }
 
 async function finalize(action) {
+    mutating++;
     try {
-        if (action.message) {
-            recordContinuationReasoning(action.message, {
-                cut: action.cutAtStart ?? 0,
-                prevReasoning: action.prevReasoning ?? null,
-                prevDuration: action.prevDuration ?? null,
+        const { message, before } = action;
+        if (!before || action.chat[action.mesid] !== message) {
+            return;
+        }
+        if (!isCurrentChat(action)) {
+            retainRecovery({ kind: 'snapshot', chat: action.chat, chatKey: action.key, index: action.mesid,
+                message, before: structuredClone(message), after: action.rollback ?? before });
+            return;
+        }
+        if (action.recovery) action.recovery.finalized = true;
+        const prefix = String(before.mes ?? '');
+        const rollback = action.rollback ?? before;
+        const text = String(message.mes ?? '');
+        const useful = action.swipe
+            ? message.swipe_id >= (before.swipes?.length ?? 1) && text.trim() && text !== '...'
+            : text.startsWith(prefix) && text.slice(prefix.length).trim();
+        if (!action.swipe && !text.startsWith(prefix)) {
+            action.error ??= new Error('The host changed the original text. The original block was restored.');
+        }
+        if (useful && !action.swipe) {
+            recordContinuationReasoning(message, {
+                cut: prefix.length,
+                prevReasoning: before.extra?.reasoning,
+                prevDuration: before.extra?.reasoning_duration,
             });
+            setCuts(message, [...getCuts(before).filter(cut => cut < prefix.length), prefix.length]);
+            syncSwipe(message);
+            const state = {
+                cut: prefix.length, revision: textRevision(prefix), message: metadataUndo(before, message),
+                swipeId: message.swipe_id ?? null,
+                swipe: metadataUndo(before.swipe_info?.[before.swipe_id], message.swipe_info?.[message.swipe_id]),
+                hadSwipes: Array.isArray(before.swipes), hadSwipeInfo: Array.isArray(before.swipe_info),
+            };
+            storyExtra(message).continuations = [
+                ...(before.extra?.[EXTRA_KEY]?.continuations ?? []),
+                state,
+            ];
+            syncSwipe(message);
+        } else if (useful && message.extra?.[EXTRA_KEY]) {
+            delete message.extra[EXTRA_KEY].reasonings;
+            syncSwipe(message);
         }
-        if (inflight === action && isCurrentChat(action) && action.chat[action.mesid] === action.message && sealCuts(action.message)) {
-            await action.context.saveChat();
+        // Record recovery before a save or a rollback can yield to host callbacks.
+        const recovery = Object.assign(action.recovery ?? {}, {
+            kind: 'snapshot', chat: action.chat, chatKey: action.key, index: action.mesid,
+            message, before: rollback, after: useful ? structuredClone(message) : rollback,
+        });
+        const stack = redoStack(action.key);
+        if (!stack.includes(recovery)) stack.push(recovery);
+        if (!useful || action.error) restoreMessage(message, rollback);
+        const attempted = structuredClone(message);
+        try {
+            await saveChat(action);
+            action.success = Boolean(useful && !action.error && isCurrentChat(action) && action.chat[action.mesid] === message);
+            dropRecovery(recovery);
+        } catch (error) {
+            action.error = error;
+            retainRecovery(recovery, attempted);
+            if (action.chat[action.mesid] === message) {
+                restoreMessage(message, rollback, attempted);
+                await saveRollback(action);
+            }
         }
+        await renderMessage(action, action.mesid, message);
+    } catch (error) {
+        action.error = error;
     } finally {
+        mutating--;
         if (inflight === action) {
             inflight = null;
-            clearDirection();
+            if (action.success && isCurrentChat(action)) clearDirection();
+        }
+        if (isCurrentChat(action) && !action.success) {
+            toast(action.error ? 'error' : 'info', action.error
+                ? 'Story Mode could not complete the change. Check the story before trying again.'
+                : 'No passage was added. Your direction is unchanged.');
         }
         hooks.afterGeneration?.(action);
     }
@@ -482,9 +661,21 @@ export async function finishOpenEdit() {
 
 // A synchronous lock so two quick taps on Continue/Retry/Undo/Redo cannot both start.
 let busy = false;
+let transformBusy = false;
+let transformRequest = null;
+let mutating = 0;
+
+export function setTransformBusy(value) {
+    transformBusy = Boolean(value);
+    refreshBusy();
+}
+
+function hostSwiping() {
+    return ctx().swipe?.state?.() === 'swiping';
+}
 
 export function isBusy() {
-    return busy || hostGenerating();
+    return busy || transformBusy || transformRequest !== null || isInflight() || hostGenerating() || hostSwiping();
 }
 
 async function locked(action) {
@@ -495,6 +686,10 @@ async function locked(action) {
     hooks.busyChanged?.(true);
     try {
         return await action();
+    } catch (error) {
+        console.error('[Story Mode] action failed', error);
+        toast('error', 'The story change could not be saved. Your recovery has been retained.');
+        return false;
     } finally {
         busy = false;
         hooks.busyChanged?.(isBusy());
@@ -511,144 +706,15 @@ function composerHasText(fallback) {
 }
 
 /**
- * The host's continue always consumes the composer, so a Retry with a draft in
- * the box would post the draft as a new block. Park the draft, run, hand it back
- * (with anything typed meanwhile appended).
- */
-async function withEmptyComposer(fn) {
-    const textarea = composer();
-    const draft = textarea ? String(textarea.value ?? '') : '';
-    if (!draft) {
-        return fn();
-    }
-    const setValue = (value) => {
-        textarea.value = value;
-        textarea.dispatchEvent?.(new Event('input', { bubbles: true }));
-    };
-    setValue('');
-    try {
-        return await fn();
-    } finally {
-        setValue(draft + String(textarea.value ?? ''));
-    }
-}
-
-/**
- * NovelAI-style output length: cap the continuation's reply through the host's
- * generation events instead of touching the preset. Returns the unhook function.
- *
- * Other requests can run inside the same Generate before ours (In-Chat Agents
- * rewrite prompts with their own model calls), so the clamp is armed on
- * GENERATE_AFTER_DATA, which the host fires once per Generate after those
- * intercepts and right before the request: text completion already carries its
- * settings in that payload; chat completion gets them one event later.
- */
-export function hookTokenCap(context, maxTokens) {
-    const cap = Number(maxTokens);
-    const events = context.eventTypes;
-    const source = context.eventSource;
-    if (!(cap > 0) || !events || typeof source?.on !== 'function') {
-        return () => {};
-    }
-    const clamp = (value) => Math.min(Number(value) > 0 ? Number(value) : cap, cap);
-    const listeners = [];
-    const listen = (type, handler) => {
-        if (type) {
-            source.on(type, handler);
-            listeners.push([type, handler]);
-        }
-    };
-    const unlisten = (type, handler) => source.removeListener?.(type, handler);
-
-    let stopTriggered = false;
-    let streamedText = '';
-    const armStreamStop = () => {
-        if (!events.STREAM_TOKEN_RECEIVED) {
-            return;
-        }
-        const onStreamToken = (text) => {
-            if (stopTriggered) {
-                return;
-            }
-            if (typeof text === 'string') {
-                if (streamedText && text.startsWith(streamedText) && text.length > streamedText.length) {
-                    streamedText = text;
-                } else {
-                    streamedText += text;
-                }
-            }
-            if (estimateTokens(streamedText, context) >= cap) {
-                stopTriggered = true;
-                try {
-                    context.stopGeneration?.();
-                } catch (error) {
-                    console.warn('[Story Mode] failed to stop generation at token cap', error);
-                }
-            }
-        };
-        listen(events.STREAM_TOKEN_RECEIVED, onStreamToken);
-    };
-
-    const clampChat = (data) => {
-        if (data && typeof data === 'object') {
-            if (isReasoningPayload(data)) {
-                armStreamStop();
-                return;
-            }
-            data.max_tokens = clamp(data.max_tokens);
-        }
-    };
-    const clampText = (params) => {
-        if (params && typeof params === 'object') {
-            if (isReasoningPayload(params)) {
-                armStreamStop();
-                return;
-            }
-            const value = clamp(params.max_new_tokens ?? params.max_tokens);
-            params.max_new_tokens = value;
-            params.max_tokens = value;
-        }
-    };
-    if (events.GENERATE_AFTER_DATA) {
-        // ponytail: a text-completion agent that rewrites the prompt through generateQuietPrompt runs a nested
-        // Generate whose GENERATE_AFTER_DATA arrives first and takes this one-shot; ours then runs uncapped.
-        const onData = (data, dryRun) => {
-            if (dryRun) {
-                return;
-            }
-            unlisten(events.GENERATE_AFTER_DATA, onData);
-            if (data && typeof data === 'object' && ('max_new_tokens' in data || 'max_tokens' in data)) {
-                clampText(data);
-                return;
-            }
-            const once = (payload) => {
-                unlisten(events.CHAT_COMPLETION_SETTINGS_READY, once);
-                clampChat(payload);
-            };
-            listen(events.CHAT_COMPLETION_SETTINGS_READY, once);
-        };
-        listen(events.GENERATE_AFTER_DATA, onData);
-    } else {
-        listen(events.CHAT_COMPLETION_SETTINGS_READY, clampChat);
-        listen(events.TEXT_COMPLETION_SETTINGS_READY, clampText);
-    }
-    return () => {
-        for (const [type, handler] of listeners.splice(0)) {
-            unlisten(type, handler);
-        }
-    };
-}
-
-/**
  * Continue the manuscript. With text in the composer the host adds it as the
  * user's block first (Generate consumes the textarea for type 'continue') and
  * then continues that block; with an empty composer it extends the last block.
  */
-async function continueUnlocked({ hasText: hasTextHint = false, direction = '', preserveRedo = false } = {}) {
+async function continueUnlocked({ hasText: hasTextHint = false, direction = '', preserveRedo = false, target = null } = {}) {
     if (isInflight()) {
         return false;
     }
-    const action = { ...captureChat(), direction, expectCut: false, expectedIndex: -1, mesid: -1, message: null };
+    const action = { ...captureChat(), direction, success: false, expectCut: false, expectedIndex: -1, mesid: -1, message: null };
     inflight = action;
     let started = false;
     try {
@@ -656,8 +722,12 @@ async function continueUnlocked({ hasText: hasTextHint = false, direction = '', 
             return false;
         }
         const { context, chat } = action;
-        const hasText = composerHasText(hasTextHint);
+        if (context.generationSupportsRequestControls !== true || hostSwiping()) return false;
+        const hasText = target ? false : composerHasText(hasTextHint);
         const last = chat.length - 1;
+        if (target && (chat !== target.chat || chat[last] !== target.message || !sameMessage(chat[last], target.before))) return false;
+        action.rollback = target?.after;
+        action.recovery = target;
         if (last < 0 && !hasText) {
             toast('info', 'Write something first, then continue.');
             return false;
@@ -683,32 +753,21 @@ async function continueUnlocked({ hasText: hasTextHint = false, direction = '', 
         }
         if (!hasText) {
             action.message = chat[last];
-            action.cutAtStart = String(action.message?.mes ?? '').length;
-            action.prevReasoning = action.message?.extra?.reasoning ?? null;
-            action.prevDuration = action.message?.extra?.reasoning_duration ?? null;
+            action.before = structuredClone(action.message);
             pushMessageCut(action.message);
         }
         started = true;
         hooks.beforeGeneration?.();
-        const autoContinue = context.powerUserSettings?.auto_continue;
-        const restoreAutoContinue = autoContinue?.enabled === true;
-        if (restoreAutoContinue) {
-            autoContinue.enabled = false;
-        }
-        const unhookTokenCap = hookTokenCap(context, getSettings().maxTokens);
-        try {
-            await context.generate('continue');
-        } finally {
-            unhookTokenCap();
-            if (restoreAutoContinue && autoContinue.enabled === false) {
-                autoContinue.enabled = true;
-            }
-        }
-        return true;
+        await context.generate('continue', {
+            suppressAutoContinue: true,
+            suppressUserMessage: Boolean(target),
+            maxOutputTokens: getSettings().maxTokens,
+        });
     } catch (error) {
-        console.error('[Story Mode] continue failed', error);
-        toast('error', 'Story Mode could not continue the text.');
-        return true;
+        if (error?.name !== 'AbortError') {
+            action.error = error;
+            console.error('[Story Mode] continue failed', error);
+        }
     } finally {
         if (started) {
             await finalize(action);
@@ -716,6 +775,7 @@ async function continueUnlocked({ hasText: hasTextHint = false, direction = '', 
             inflight = null;
         }
     }
+    return action.success;
 }
 
 export function continueStory(options) {
@@ -733,8 +793,30 @@ function redoStack(key = chatIdentity()) {
     return redoByChat.get(key);
 }
 
-export function clearRedo() {
-    redoByChat.clear();
+export function clearRedo({ discardFailures = false } = {}) {
+    for (const [key, stack] of redoByChat) {
+        const retained = discardFailures ? [] : stack.filter(entry => entry.failed);
+        if (retained.length) redoByChat.set(key, retained);
+        else redoByChat.delete(key);
+    }
+}
+
+function retainRecovery(entry, attempted = entry.before) {
+    entry.failed = true;
+    entry.attempted ??= structuredClone(attempted);
+    const stack = redoStack(entry.chatKey);
+    if (!stack.includes(entry)) stack.push(entry);
+}
+
+function dropRecovery(entry) {
+    const stack = redoByChat.get(entry.chatKey);
+    const index = stack?.indexOf(entry) ?? -1;
+    if (index >= 0) stack.splice(index, 1);
+}
+
+function recoveryBase(entry, message) {
+    return [entry.before, entry.attempted, entry.after].find(snapshot => snapshot && (sameMessage(message, snapshot)
+        || (entry.failed && message && ['mes', 'is_user', 'is_system', 'swipe_id'].every(key => message[key] === snapshot[key]))));
 }
 
 export function canRedo() {
@@ -746,12 +828,11 @@ export function canUndo() {
 }
 
 function redoMatches(entry, chat, key) {
-    if (!entry || entry.chat !== chat || entry.chatKey !== key) {
+    if (!entry || (!entry.failed && entry.chat !== chat) || entry.chatKey !== key) {
         return false;
     }
-    if (entry.kind === 'tail') {
-        const message = chat[entry.mesid];
-        return entry.mesid === chat.length - 1 && String(message?.mes ?? '') === entry.prefix;
+    if (entry.kind === 'snapshot') {
+        return (entry.failed || entry.index === chat.length - 1) && Boolean(recoveryBase(entry, chat[entry.index]));
     }
     if (entry.kind === 'message') {
         const previous = chat.at(-1);
@@ -766,18 +847,21 @@ function redoMatches(entry, chat, key) {
 }
 
 export function clearRedoIfDiverged() {
+    if (mutating) return false;
     const context = ctx();
     const key = chatIdentity(context);
     const stack = redoByChat.get(key);
     if (stack?.length && !redoMatches(stack.at(-1), context.chat, key)) {
-        redoByChat.delete(key);
+        const retained = stack.filter(entry => entry.failed);
+        if (retained.length) redoByChat.set(key, retained);
+        else redoByChat.delete(key);
         return true;
     }
     return false;
 }
 
 async function truncateLastContinuation(action) {
-    const { context, chat } = action;
+    const { chat } = action;
     const index = chat.length - 1;
     const message = chat[index];
     if (!message) {
@@ -792,24 +876,64 @@ async function truncateLastContinuation(action) {
     if (cut >= text.length) {
         return null;
     }
-    const tail = text.slice(cut);
-    message.mes = text.slice(0, cut);
-    syncSwipe(message);
-    let reasoning = null;
-    const reasonings = message.extra?.[EXTRA_KEY]?.reasonings;
-    if (Array.isArray(reasonings) && reasonings.length > 0) {
-        const last = reasonings.at(-1);
-        if (last && last.cut >= cut) {
-            reasoning = reasonings.pop();
+    const after = structuredClone(message);
+    const history = message.extra?.[EXTRA_KEY]?.continuations ?? [];
+    if (!Array.isArray(history)) throw new Error('The continuation history is invalid');
+    const recorded = history.at(-1);
+    let before;
+    if (history.length) {
+        if (recorded?.cut !== cut || recorded.revision !== textRevision(text.slice(0, cut))
+            || !Array.isArray(recorded.message?.fields) || !Array.isArray(recorded.swipe?.fields)) {
+            throw new Error('The continuation snapshot does not match the original text');
         }
+        before = structuredClone(message);
+        before.mes = text.slice(0, cut);
+        restoreMetadata(before, recorded.message);
+        if (recorded.swipeId !== null) {
+            if (before.swipes) before.swipes[recorded.swipeId] = before.mes;
+            const info = before.swipe_info?.[recorded.swipeId];
+            if (info) restoreMetadata(info, recorded.swipe);
+        }
+        if (!recorded.hadSwipes && before.swipes?.length === 1) delete before.swipes;
+        if (!recorded.hadSwipeInfo && before.swipe_info?.length === 1) delete before.swipe_info;
+    } else {
+        // Shipped cuts lack snapshots. Their revision validates the text; recover available reasoning only.
+        before = structuredClone(message);
+        before.mes = text.slice(0, cut);
+        const reasonings = before.extra?.[EXTRA_KEY]?.reasonings;
+        const kept = Array.isArray(reasonings) ? reasonings.filter(reasoning => reasoning.cut < cut) : [];
+        if (Array.isArray(reasonings)) {
+            storyExtra(before).reasonings = kept;
+        }
+        if (kept.length) {
+            before.extra.reasoning = kept.at(-1).text;
+            before.extra.reasoning_duration = kept.at(-1).duration;
+        } else {
+            delete before.extra.reasoning;
+            delete before.extra.reasoning_duration;
+        }
+        delete before.extra.reasoning_signature;
+        delete before.extra.reasoning_tokens;
+        setCuts(before, cuts);
+        syncSwipe(before);
     }
-    setCuts(message, cuts);
-    const saving = context.saveChat();
-    if (isCurrentChat(action)) {
-        await context.updateMessageBlock(index, message);
+    const entry = { kind: 'snapshot', chat, chatKey: action.key, index, message, before, after };
+    redoStack(action.key).push(entry);
+    mutating++;
+    try {
+        restoreMessage(message, before);
+        await saveChat(action);
+    } catch (error) {
+        retainRecovery(entry, before);
+        if (chat[index] === message) {
+            restoreMessage(message, after, before);
+            await saveRollback(action);
+        }
+        throw error;
+    } finally {
+        try { await renderMessage(action, index, message); } finally { mutating--; }
     }
-    await saving;
-    return { mesid: index, cut, tail, prefix: message.mes, reasoning };
+    return entry;
 }
 
 export function undo() {
@@ -818,7 +942,7 @@ export function undo() {
             return false;
         }
         const action = captureChat();
-        if (!await finishOpenEdit() || !isCurrentChat(action)) {
+        if (!await finishOpenEdit() || !isCurrentChat(action) || hostSwiping()) {
             return false;
         }
         const { context, chat } = action;
@@ -829,10 +953,7 @@ export function undo() {
         }
         if (getCuts(message).length) {
             const removed = await truncateLastContinuation(action);
-            if (removed) {
-                redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
-            }
-            return true;
+            return Boolean(removed);
         }
         if (hasCutMetadata(message)) {
             toast('info', 'This block changed since its continuation was recorded, so it cannot be undone safely.');
@@ -845,14 +966,25 @@ export function undo() {
                 isUser: Boolean(chat[index - 1]?.is_user),
                 isSystem: Boolean(chat[index - 1]?.is_system),
             } : null;
-            const deleting = context.deleteLastMessage();
-            const saving = context.saveChat({ allowShrink: true });
-            await deleting;
-            await saving;
-            if (isCurrentChat(action)) {
-                context.swipe?.refresh?.();
+            const entry = { kind: 'message', chat, chatKey: action.key, index, previous, message: copy };
+            redoStack(action.key).push(entry);
+            mutating++;
+            try {
+                await context.deleteLastMessage();
+                await saveChat(action, { allowShrink: true });
+            } catch (error) {
+                retainRecovery(entry);
+                if (redoMatches(entry, chat, action.key)) {
+                    chat.push(message);
+                    Object.assign(entry, { kind: 'snapshot', message, before: copy, after: copy });
+                    await saveRollback(action);
+                    if (isCurrentChat(action)) context.addOneMessage(message);
+                }
+                throw error;
+            } finally {
+                mutating--;
+                if (isCurrentChat(action)) context.swipe?.refresh?.();
             }
-            redoStack(action.key).push({ kind: 'message', chat: action.chat, chatKey: action.key, index, previous, message: copy });
             return true;
         }
         toast('info', 'Nothing to undo: the last block is yours. Tap it to edit.');
@@ -866,51 +998,53 @@ export function redo() {
             return false;
         }
         const action = captureChat();
-        if (!await finishOpenEdit() || !isCurrentChat(action)) {
+        if (!await finishOpenEdit() || !isCurrentChat(action) || hostSwiping()) {
             return false;
         }
         const { context, chat } = action;
-        const entry = redoStack(action.key).pop();
+        const stack = redoStack(action.key);
+        const entry = stack.at(-1);
         if (!entry) {
             return false;
         }
-        if (entry.kind === 'tail') {
-            const message = chat[entry.mesid];
-            if (!redoMatches(entry, chat, action.key) || !message) {
-                toast('info', 'That block changed since the undo, so there is nothing safe to put back.');
-                return false;
-            }
-            const cuts = getCuts(message);
-            message.mes = String(message.mes ?? '') + entry.tail;
-            syncSwipe(message);
-            if (entry.reasoning) {
-                const extra = storyExtra(message);
-                extra.reasonings ??= [];
-                extra.reasonings.push(entry.reasoning);
-            }
-            setCuts(message, [...cuts, entry.cut]);
-            const saving = context.saveChat();
-            if (isCurrentChat(action)) {
-                await context.updateMessageBlock(entry.mesid, message);
-            }
-            await saving;
-            return true;
+        if (!redoMatches(entry, chat, action.key)) {
+            toast('info', 'The story changed since the undo, so there is nothing safe to put back.');
+            return false;
         }
-        if (entry.kind === 'message') {
-            if (!redoMatches(entry, chat, action.key)) {
-                toast('info', 'The story changed since the undo, so there is nothing safe to put back.');
-                return false;
+        mutating++;
+        let before;
+        let attempted;
+        try {
+            if (entry.kind === 'snapshot') {
+                entry.message = chat[entry.index];
+                before = structuredClone(entry.message);
+                restoreMessage(entry.message, entry.after, recoveryBase(entry, entry.message));
+            } else {
+                chat.push(entry.message);
             }
-            chat.push(entry.message);
-            const saving = context.saveChat();
-            if (isCurrentChat(action)) {
-                context.addOneMessage(entry.message);
-                context.swipe?.refresh?.();
-            }
-            await saving;
+            attempted = structuredClone(entry.message);
+            await saveChat(action);
+            dropRecovery(entry);
+            if (entry.kind === 'message' && isCurrentChat(action)) context.addOneMessage(entry.message);
             return true;
+        } catch (error) {
+            retainRecovery(entry, attempted);
+            if (entry.kind === 'snapshot' && chat[entry.index] === entry.message) {
+                restoreMessage(entry.message, before, attempted);
+                await saveRollback(action);
+            } else if (entry.kind === 'message' && chat[entry.index] === entry.message) {
+                if (chat.length === entry.index + 1 && sameMessage(entry.message, attempted)) {
+                    chat.pop();
+                    await saveRollback(action, { allowShrink: true });
+                } else {
+                    const preserved = structuredClone(entry.message);
+                    Object.assign(entry, { kind: 'snapshot', before: preserved, after: preserved });
+                }
+            }
+            throw error;
+        } finally {
+            try { await renderMessage(action, entry.index, entry.message); } finally { mutating--; }
         }
-        return false;
     });
 }
 
@@ -920,7 +1054,7 @@ export function retry() {
             return false;
         }
         const action = captureChat();
-        if (!await finishOpenEdit() || !isCurrentChat(action)) {
+        if (!await finishOpenEdit() || !isCurrentChat(action) || hostSwiping()) {
             return false;
         }
         const { context, chat } = action;
@@ -929,29 +1063,28 @@ export function retry() {
         if (!message) {
             return false;
         }
+        if (context.generationSupportsRequestControls !== true) return false;
         if (getCuts(message).length) {
-            return withEmptyComposer(async () => {
-                const removed = await truncateLastContinuation(action);
-                if (!isCurrentChat(action)) {
-                    if (removed && String(message.mes ?? '') === removed.prefix) {
-                        redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
-                    }
-                    return false;
+            const removed = await truncateLastContinuation(action);
+            if (!removed) return false;
+            const result = isCurrentChat(action) && await continueUnlocked({ preserveRedo: true, target: removed });
+            if (result) {
+                clearRedo();
+            } else if (!removed.finalized && chat[index] === message && sameMessage(message, removed.before)) {
+                mutating++;
+                try {
+                    restoreMessage(message, removed.after);
+                    removed.before = structuredClone(removed.after);
+                    await saveChat(action);
+                    dropRecovery(removed);
+                } catch (error) {
+                    retainRecovery(removed);
+                    throw error;
+                } finally {
+                    try { await renderMessage(action, index, message); } finally { mutating--; }
                 }
-                if (!removed) {
-                    return false;
-                }
-                const result = await continueUnlocked({ hasText: false, preserveRedo: true });
-                const replacementSucceeded = action.chat[removed.mesid] === message
-                    && String(message.mes ?? '').length > removed.prefix.length
-                    && getCuts(message).includes(removed.cut);
-                if (replacementSucceeded) {
-                    clearRedo();
-                } else if (String(message.mes ?? '') === removed.prefix) {
-                    redoStack(action.key).push({ kind: 'tail', chat: action.chat, chatKey: action.key, ...removed });
-                }
-                return result;
-            });
+            }
+            return result;
         }
         if (hasCutMetadata(message)) {
             toast('info', 'This block changed since its continuation was recorded, so it cannot be retried safely.');
@@ -962,8 +1095,23 @@ export function retry() {
                 toast('info', 'Swipes are off or a generation is still running.');
                 return false;
             }
-            await context.swipe.right(null, { source: 'story-mode' });
-            return true;
+            if (typeof context.swipe?.to !== 'function') return false;
+            Object.assign(action, { message, mesid: index, before: structuredClone(message), direction: '', swipe: true, success: false });
+            inflight = action;
+            mutating++;
+            try {
+                hooks.beforeGeneration?.();
+                await context.swipe.to(null, 'right', {
+                    source: 'story-mode', message, forceSwipeId: message.swipes?.length ?? 1,
+                    generationOptions: { suppressAutoContinue: true, suppressUserMessage: true, maxOutputTokens: getSettings().maxTokens },
+                });
+            } catch (error) {
+                if (error?.name !== 'AbortError') action.error = error;
+            } finally {
+                try { await finalize(action); } finally { mutating--; }
+            }
+            if (action.success) clearRedo();
+            return action.success;
         }
         toast('info', 'Nothing to retry yet: the last block is yours.');
         return false;
@@ -972,21 +1120,13 @@ export function retry() {
 
 // ---------------------------------------------------------------- in-chat agents gate
 
-/**
- * The host's In-Chat Agents decide what runs from each agent's global enabled
- * flag, read from event handlers and from their own timers alike. There is no
- * per-chat switch and no veto hook, so while Story Mode is on in the open chat
- * the non-allowed agents are kept switched off in memory (never saved; a reload
- * restores them from disk) and switched back on when the mode or the chat changes.
- */
 let agentStore = null;
 let agentStoreLoad = null;
-const gatedAgents = [];
 
 export function loadAgentStore() {
     agentStoreLoad ??= import('/scripts/extensions/in-chat-agents/agent-store.js')
         .then((mod) => {
-            agentStore = typeof mod?.getAgents === 'function' && typeof mod?.getEnabledAgents === 'function' && typeof mod?.setAgentEnabledForScope === 'function' ? mod : null;
+            agentStore = ['getAgents', 'getEnabledAgents', 'setRuntimeAgentFilter', 'isAgentRuntimeAllowed'].every(key => typeof mod?.[key] === 'function') ? mod : null;
             return agentStore;
         })
         .catch(() => {
@@ -1009,67 +1149,65 @@ export function listAgents(store = agentStore) {
         id: String(agent.id ?? ''),
         name: String(agent.name ?? '').trim() || 'Unnamed agent',
         enabled: typeof store.isAgentEnabledForCurrentScope === 'function' ? Boolean(store.isAgentEnabledForCurrentScope(agent)) : Boolean(agent.enabled),
+        paused: !storyAgentAllowed(agent),
     })).filter((agent) => agent.id);
 }
 
-/**
- * Makes the in-memory agent flags match the allow-list for the current chat:
- * gated while Story Mode is on here and the setting is on, released otherwise.
- * Returns the ids currently held off.
- */
+function storyAgentAllowed(agent) {
+    const settings = getSettings();
+    return !settings.agentGate || !isEnabled() || settings.allowedAgents.includes(String(agent.id));
+}
+
+/** Runtime-only: the predicate reads current settings even for queued or timer-driven calls. */
 export function applyAgentGate(store = agentStore) {
     if (!store) {
         return [];
     }
-    const settings = getSettings();
-    const active = settings.agentGate && isEnabled();
-    const allowed = new Set(settings.allowedAgents);
-    for (const agent of gatedAgents.splice(0)) {
-        if (active && !allowed.has(String(agent.id))) {
-            gatedAgents.push(agent);
-        } else {
-            store.setAgentEnabledForScope(agent, true);
-        }
-    }
-    if (active) {
-        for (const agent of store.getEnabledAgents()) {
-            if (!allowed.has(String(agent.id)) && !gatedAgents.includes(agent)) {
-                store.setAgentEnabledForScope(agent, false);
-                gatedAgents.push(agent);
-            }
-        }
-    }
-    return gatedAgents.map((agent) => String(agent.id));
+    store.setRuntimeAgentFilter(SETTINGS_KEY, storyAgentAllowed);
+    return listAgents(store).filter(agent => agent.enabled && agent.paused).map(agent => agent.id);
 }
 
-/** Switches every gated agent back on. Safe to call any number of times. */
+/** Removes only our runtime restriction, leaving all stored choices untouched. */
 export function releaseAgentGate(store = agentStore) {
-    const agents = gatedAgents.splice(0);
-    for (const agent of agents) {
-        store?.setAgentEnabledForScope(agent, true);
-    }
-    return agents.length;
+    store?.setRuntimeAgentFilter(SETTINGS_KEY, null);
 }
 
 // ---------------------------------------------------------------- selection transforms
 
 export async function runTransform({ kind, instruction = '', value, start, end, signal }) {
+    // The UI owns transformBusy across its dialog and request. Do not reject that reservation.
+    if (busy || isInflight() || hostGenerating() || hostSwiping() || transformRequest) return '';
+    signal?.throwIfAborted();
     const context = ctx();
     const window = contextWindow(value, start, end);
     if (!window.selection.trim()) {
         return '';
     }
-    const { systemPrompt, prompt, responseLength } = buildTransformPrompt(kind, { ...window, instruction });
-    const raw = getSettings().transformsUseFullContext
-        ? await context.generateQuietPrompt({ quietPrompt: `${systemPrompt}\n\n${prompt}`, skipWIAN: true, responseLength, signal })
-        : await context.generateRaw({ systemPrompt, prompt, responseLength, signal });
-    const result = cleanTransformResult(raw, window.selection);
-    if (!result) {
-        return '';
+    const request = {};
+    transformRequest = request;
+    const release = () => {
+        if (transformRequest === request) {
+            transformRequest = null;
+            refreshBusy();
+        }
+    };
+    signal?.addEventListener('abort', release, { once: true });
+    refreshBusy();
+    try {
+        const { systemPrompt, prompt, responseLength } = buildTransformPrompt(kind, { ...window, instruction });
+        const raw = getSettings().transformsUseFullContext
+            ? await context.generateQuietPrompt({ quietPrompt: `${systemPrompt}\n\n${prompt}`, skipWIAN: true, responseLength, signal, preserveReasoningBudget: true })
+            : await context.generateRaw({ systemPrompt, prompt, responseLength, signal, preserveReasoningBudget: true });
+        signal?.throwIfAborted();
+        const result = cleanTransformResult(raw, window.selection);
+        if (!result) return '';
+        const leading = window.selection.match(/^\s*/u)?.[0] ?? '';
+        const trailing = window.selection.match(/\s*$/u)?.[0] ?? '';
+        return `${leading}${result}${trailing}`;
+    } finally {
+        signal?.removeEventListener('abort', release);
+        release();
     }
-    const leading = window.selection.match(/^\s*/u)?.[0] ?? '';
-    const trailing = window.selection.match(/\s*$/u)?.[0] ?? '';
-    return `${leading}${result}${trailing}`;
 }
 
 // ---------------------------------------------------------------- slash command

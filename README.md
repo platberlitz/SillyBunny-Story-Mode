@@ -16,10 +16,10 @@ Story Mode is a per-chat mode. Switched on, the chat stops being a row of speech
 
 - Turns the open chat into a continuous manuscript: no avatars, names, timestamps or message boxes, a readable column width, and the text sitting directly on the theme's own chat background.
 - **Continue** extends the last block, or adds the composer text as a new block first and continues from the end of it. Alt+Enter does the same from the keyboard.
-- Cuts each continuation off at a token limit (160 by default, 0 uses the preset's response length), the way NovelAI's output length works, so the model stops short and the next Continue picks up from there.
+- Limits each continuation to a short passage (160 tokens by default, 0 uses the preset's response length). The local prose safeguard estimates four characters per token, so this isn't an exact token count.
 - **Retry** redoes the last continuation, **Undo** removes it, **Redo** puts it back; Alt+R, Alt+Z and Alt+Y from the keyboard. Cut points are saved with each message and checked against the text, so Undo survives a reload without applying stale offsets to edited text.
 - **Export** downloads the manuscript as a plain text file: no speaker names, hidden blocks left out, and a paragraph that stopped mid-sentence runs straight into the next. The bar keeps a running word count next to it.
-- **Direction** takes a one-line instruction that goes to the model for the next continuation only and is cleared afterwards.
+- **Direction** takes a one-line instruction for the next continuation and clears it after a passage is added. A failed or empty attempt keeps the instruction for retrying.
 - Holds off the host's bare left and right arrow keys, which otherwise swipe the whole last block away; the on-screen swipe arrows still work.
 - Tap any paragraph to edit it in SillyBunny's own message editor, restyled to look like the page. Escape and the tick both keep the edit.
 - Select text while editing and **Rewrite**, **Expand**, **Compress** or give a **Custom** instruction; the result replaces the selection in place.
@@ -33,19 +33,19 @@ Story Mode is a per-chat mode. Switched on, the chat stops being a row of speech
 
 **Continue.** The button above the composer. With text in the box, that text goes in as the next block and the model continues from the end of it; with the box empty, the model extends the last paragraph. Both go through SillyBunny's own Continue, so with Claude and 'Continue prefill' on, a model block is handed back as a prefill and continuations pick up mid-word. The token limit applies only to Story Mode's own continuations, never to the normal send button; press Continue again to keep going.
 
-**Retry, Undo, Redo.** Retry redoes the last continuation, Undo removes it, Redo puts it back. If the last block came from the normal send button, Retry swipes it and Undo deletes it, which is SillyBunny's usual behaviour. The three buttons are disabled when there is nothing for them to do, so a block the user typed cannot be undone by accident. Retry with a draft sitting in the composer parks the draft, redoes the continuation, then hands the draft back. On a phone, or with a narrow chat pane, the buttons shrink to icons, Continue keeps its label, and the word count and Export step off the bar so it stays one row.
+**Retry, Undo, Redo.** Retry redoes the last continuation, Undo removes it, Redo puts it back. If the last block came from the normal send button, Retry creates a fresh swipe and Undo deletes it, which is SillyBunny's usual behaviour. The three buttons are disabled when there is nothing for them to do, so a block you typed cannot be undone by accident. Retry leaves your composer draft untouched, including text typed while it waits. On a phone, or with a narrow chat pane, secondary buttons become icons and Continue keeps its label. Export hides first, then the count's unit and finally the count itself when space runs out.
 
 **Keys.** Alt+Enter continues, Alt+R retries, Alt+Z undoes, Alt+Y redoes; each does exactly what its button does, including nothing while the button is disabled. Bare ArrowLeft and ArrowRight, which swipe the last block in a normal chat, do nothing while Story Mode is on. The host's other shortcuts (Ctrl+Enter, ArrowUp to edit) are untouched.
 
-**Export and word count.** The download arrow at the right end of the bar saves the whole manuscript as `<character> - <date>.txt`: plain text, no `Name:` prefixes, hidden blocks skipped, a block that stopped mid-sentence joined to the next with a space and everything else separated by a blank line. The number beside it is the manuscript's word count, refreshed whenever the chat changes; tokens with no letters or digits (`* * *`, `--`) are not counted. Both stay off the bar on a phone.
+**Export and word count.** The download arrow at the right end of the bar saves the whole manuscript as `<character> - <date>.txt`: plain text, no `Name:` prefixes, hidden blocks skipped, a block that stopped mid-sentence joined to the next with a space and everything else separated by a blank line. The number beside it is the manuscript's word count, refreshed whenever the chat changes; tokens with no letters or digits (`* * *`, `--`) are not counted. Export stays off the phone bar; the count remains where it fits without wrapping the controls.
 
-**Direction.** The signpost button opens a one-line box. Whatever is typed there is sent for the next continuation only ('Have the stranger turn out to be her brother'), then cleared. Enter in the box continues; Escape closes it. Close the box with a direction still in it and the button stays tinted, so it is plain that the next Continue is steered.
+**Direction.** The signpost button opens a one-line box. Whatever is typed there is sent for the next continuation only ('Have the stranger turn out to be her brother'), then cleared once a passage is added. A failed or empty attempt leaves it available. Enter in the box continues; Escape closes it. Close the box with a direction still in it and the button stays tinted, so it is plain that the next Continue is steered.
 
-**Editing.** Tapping a paragraph opens SillyBunny's message editor for that block, so the host's pencil icon is hidden; the flag and the bin stay. The host normally discards an edit on Escape; in Story Mode Escape keeps it, as does the tick. Tapping another paragraph saves the open one first. With the host's 'Expand message actions' setting on, the icon row is a dozen icons wide, so it gets its own line above each paragraph instead of sitting beside the first one.
+**Editing.** Tapping a paragraph opens SillyBunny's message editor for that block. The pencil stays hidden until reached with the keyboard; the flag and the bin stay visible. The host normally discards an edit on Escape; in Story Mode Escape keeps it, as does the tick. Escape inside Custom closes only that dialog, leaving your paragraph draft intact. Tapping another paragraph saves the open one first. With the host's 'Expand message actions' setting on, the icon row gets its own line above each paragraph instead of sitting beside the first one.
 
 **Rewriting a selection.** While a paragraph is open for editing, selecting text shows a row under the box: Rewrite, Expand, Compress, Custom. The row stays on screen while a long paragraph scrolls. The result replaces the selection and stays selected, so another pass can be run on it straight away. Nothing is saved until the editor is closed, unless SillyBunny's message-edit auto-save setting is on, and the row says when the browser added the change to Ctrl+Z history. By default the model sees the selection and a couple of paragraphs either side; a setting sends the whole story instead for a closer match to the voice.
 
-**Agents.** The bundled In-Chat Agents keep working in Story Mode because they read the chat like anything else. To restrict them in stories (Plot Compass and Continuity, say, but not trackers that write into the text), tick 'Only the agents ticked below run while Story Mode is on' in the settings and choose the agents. While a Story Mode chat is open the others are held off and show as off in the Agents tab for that time; nothing about them is saved, and they come back as soon as Story Mode is off in that chat or another chat is opened. Story Mode's continuations count as 'continue' generations, so an agent only fires on them if its own trigger list includes Continue (Direction Menu ships with Normal only).
+**Agents.** The bundled In-Chat Agents keep working in Story Mode because they read the chat like anything else. To restrict them in stories (Plot Compass and Continuity, say, but not trackers that write into the text), tick 'Only the agents ticked below run while Story Mode is on' in the settings and choose the agents. Story Mode pauses the others without changing their saved switches, even if you save an agent or switch between individual and group chats. The Story Mode list distinguishes a temporary pause from an agent you've switched off yourself. Continuations still use the Continue trigger, so an agent only fires if its own trigger list includes it.
 
 **Room to read.** Above the mobile shell, the chat column grows to about 58em while Story Mode is on, unless the Chat Width setting is already wider, and the text itself stays under about 50em per line.
 
@@ -74,7 +74,7 @@ A card is a workable container for a whole story:
 - **Character's note (depth prompt)** - a shipped Author's Note, N messages from the end.
 - **Embedded lorebook** - the Lorebook proper, one concept per entry. Import it when SillyBunny offers to; an embedded book is not scanned until it is a real lorebook file.
 - **Creator notes and tags** - the blurb and genre, never sent to the model.
-- **Story Mode's own card settings** - in Customize › Extensions › Story Mode while the card is open: 'Open this character's chats in Story Mode', and optional rules that replace the general ones. Both live inside the card and travel with it.
+- **Story Mode's own card settings** - in Customize › Extensions › Story Mode while the card is open: follow the global default, always on, or always off, plus optional rules that replace the general ones. Both live inside the card and travel with it.
 
 For an ensemble, put a 'Narrator' card (world and style) and one card per lead into a group with 'join character cards' on. The persona is either the protagonist (first person: its description is the protagonist's memory) or nobody (third person: an empty persona). To talk to a character about the story, open a second chat with the same card, or turn on the bundled Actor Interview companion.
 
@@ -82,12 +82,12 @@ For an ensemble, put a 'Narrator' card (world and style) and one card per lead i
 
 - Chat completion APIs are the happy path. Text completion backends prefix every block with a name (`Ann:`), which spoils the manuscript; an instruct template with names off is the workaround.
 - Empty-box Continue works in groups. With text in the composer, send it first: the host does not add composer text during a group continuation, so Story Mode refuses rather than continuing the wrong block.
-- Story Mode pauses the host's Auto-continue setting only while its own request runs, then restores it, so one Continue stays one undoable passage.
+- Story Mode skips Auto-continue for its own request without changing the saved setting, so one Continue stays one undoable passage.
 - The shading of a model tail inside a user paragraph is measured against the rendered text, so markdown that straddles the join can shift it by a few characters.
 - Rewrites and the custom instruction are one-shot calls without streaming, and the host's Stop button does not reach them; the row has its own Stop.
-- Redo history lives in memory, is forgotten on a chat switch, and is discarded after a divergent edit or generation.
-- `GENERATION_ENDED` does not arrive on the mobile shell, so the bar follows the host's own generating markers instead; the agents allow-list and the token limit rely only on events that fire on every platform.
-- The token limit is armed right before Story Mode's own request goes out, so an agent that makes its own model call earlier in the same Continue keeps its own length. One gap remains: on a text completion backend, an agent that runs a full nested generation at that point takes the limit instead of the continuation.
+- Ordinary Redo history lives in memory and is cleared on a chat switch or a divergent edit or generation. Recovery from a failed save is kept across chat switches in the same session, but not across a reload. Check unsaved work before closing the page.
+- The bar follows both the host's completion events and its generating markers. Requests made by agents keep their own limits; they cannot take the continuation's limit.
+- Reasoning models keep their thinking allowance. Streaming prose stops at the local estimate; without streaming, the full response arrives before prose is trimmed, so the request can still cost the full preset allowance. Unknown model aliases without explicit thinking settings may not be recognised.
 - Export reads the message text itself, not what another extension shows in its place (a translation, say).
 
 ## Settings
@@ -95,6 +95,8 @@ For an ensemble, put a 'Narrator' card (world and style) and one card per lead i
 Customize › Extensions › Story Mode, in four groups: the switches (per chat, the start-in-Story-Mode default, and the open card's own switch and rules); Writing (the rules text with a reset, the length hint, the token limit per continuation, and whether rewrites see the whole story); Appearance (shading, off by default, and the serif font); and which In-Chat Agents may run while Story Mode is on. While the open card carries its own rules, the general rules are labelled as unused and dimmed, so there is no guessing which set the model gets.
 
 ## Install
+
+This unreleased branch requires the companion SillyBunny host changes for request-specific limits, temporary agent pauses and confirmed saves. It refuses to activate on an older host rather than silently weakening those protections. I won't release the extension update before that host support is available.
 
 Use SillyBunny's extension installer with `https://github.com/platberlitz/SillyBunny-Story-Mode`, or clone it into `data/<user>/extensions/` (one user) or `public/scripts/extensions/third-party/` (everyone), then make sure it is enabled under Customize › Extensions. No build step, no dependencies.
 

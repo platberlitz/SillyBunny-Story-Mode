@@ -10,7 +10,7 @@
   "type": "module",
   "scripts": {
     "test": "node --test",
-    "check": "node --check index.js && node --check src/core.js && node --check src/api.js && node --check src/ui.js && node --check test/core.test.js && node --check test/api.test.js && node --check test/release.test.js"
+    "check": "node --check index.js && node --check src/core.js && node --check src/api.js && node --check src/ui.js && node --check test/core.test.js && node --check test/api.test.js && node --check test/ui.test.js && node --check test/release.test.js"
   },
   "engines": {
     "node": ">=20"

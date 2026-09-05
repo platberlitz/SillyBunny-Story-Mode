@@ -115,11 +115,11 @@ export function textRevision(text) {
     return `${value.length}:${4294967296 * (2097151 & h2) + (h1 >>> 0)}`;
 }
 
-export function getCuts(message, { ignoreRevision = false } = {}) {
+export function getCuts(message) {
     const state = message?.extra?.[EXTRA_KEY];
     const cuts = state?.cuts;
     const text = String(message?.mes ?? '');
-    if (!Array.isArray(cuts) || (!ignoreRevision && state.revision !== textRevision(text))) {
+    if (!Array.isArray(cuts) || state.revision !== textRevision(text)) {
         return [];
     }
     let previous = -1;
@@ -152,7 +152,8 @@ export function canRevertBlock(message) {
     if (getCuts(message).length > 0) {
         return true;
     }
-    const stamped = Boolean(message.extra && typeof message.extra === 'object' && Object.hasOwn(message.extra, EXTRA_KEY));
+    const state = message.extra?.[EXTRA_KEY];
+    const stamped = state && (Object.hasOwn(state, 'cuts') || Object.hasOwn(state, 'revision'));
     return !stamped && !message.is_user && !message.is_system;
 }
 
@@ -245,42 +246,8 @@ export const TRANSFORMS = Object.freeze({
 export const TRANSFORM_SYSTEM = 'You are a line editor working inside a manuscript. Change only the passage you are given; '
     + 'the text around it is context and must not be repeated. Reply with the replacement passage only: no preamble, no quotes, no notes.';
 
-export function estimateTokens(text, context = null) {
-    if (typeof context?.getTokenCount === 'function') {
-        try {
-            const count = context.getTokenCount(text);
-            if (typeof count === 'number' && !Number.isNaN(count) && count >= 0) {
-                return count;
-            }
-        } catch {
-            // fallback to character estimate
-        }
-    }
+export function estimateTokens(text) {
     return Math.ceil(String(text ?? '').length / 3.5);
-}
-
-/** Detects whether an API payload or parameters activate reasoning / thinking mode. */
-export function isReasoningPayload(data) {
-    if (!data || typeof data !== 'object') {
-        return false;
-    }
-    if (data.include_reasoning === true) {
-        return true;
-    }
-    if (data.reasoning_effort && data.reasoning_effort !== 'none') {
-        return true;
-    }
-    if (data.thinking && (data.thinking.type === 'enabled' || Number(data.thinking.budget_tokens) > 0 || typeof data.thinking === 'object')) {
-        return true;
-    }
-    if (data.max_completion_tokens !== undefined) {
-        return true;
-    }
-    const model = String(data.model ?? data.model_name ?? '');
-    if (/(?:^|[/:_-])(?:o[134]|gpt-5|deepseek-(?:r1|reasoner)|gemini-2\.[0-9]-flash-thinking|kimi-k2-thinking|thinking)(?:$|[/:_.-])/i.test(model)) {
-        return true;
-    }
-    return false;
 }
 
 /**
@@ -314,8 +281,8 @@ export function clampTokens(value, min = 64, max = 1024) {
     return Math.min(max, Math.max(min, number));
 }
 
-export function formatDuration(seconds) {
-    const s = Math.round(Number(seconds) || 0);
+export function formatDuration(milliseconds) {
+    const s = Math.max(0, Math.round((Number(milliseconds) || 0) / 1000));
     if (s < 60) {
         return `${s}s`;
     }

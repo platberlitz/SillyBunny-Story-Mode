@@ -40,9 +40,10 @@ function assertCapabilities(context) {
         ['event source', typeof context.eventSource?.on === 'function' && typeof context.eventSource?.removeListener === 'function'],
         ['chat metadata', typeof context.saveMetadata === 'function'],
         ['generation', typeof context.generate === 'function' && typeof context.generateRaw === 'function' && typeof context.generateQuietPrompt === 'function'],
+        ['request-specific generation controls', context.generationSupportsRequestControls === true],
         ['prompt injection', typeof context.setExtensionPrompt === 'function'],
         ['message editing', typeof context.updateMessageBlock === 'function' && typeof context.deleteLastMessage === 'function' && typeof context.addOneMessage === 'function' && typeof context.saveChat === 'function'],
-        ['swipes', typeof context.swipe?.right === 'function'],
+        ['swipes', typeof context.swipe?.to === 'function'],
         ['card fields', typeof context.writeExtensionField === 'function'],
         ['message formatting', typeof context.messageFormatting === 'function'],
     ]) {
@@ -106,7 +107,14 @@ async function setEnabled(enabled, { renderDrawer = false } = {}) {
         ui.renderDrawer();
         return false;
     }
-    await api.setChatFlag(enabled);
+    try {
+        if (!await api.setChatFlag(enabled)) return false;
+    } catch (error) {
+        console.error('[Story Mode] mode preference was not saved', error);
+        api.toast('error', 'Story Mode could not save this chat preference. Try again.');
+        ui.renderDrawer();
+        return false;
+    }
     apply({ renderDrawer });
     return true;
 }
@@ -122,7 +130,7 @@ async function onStoryCommand(arg) {
     if (!api.hasChat()) {
         return 'Open a chat first.';
     }
-    await setEnabled(next, { renderDrawer: true });
+    if (!await setEnabled(next, { renderDrawer: true })) return 'Story Mode preference was not saved.';
     return next ? 'on' : 'off';
 }
 
@@ -143,7 +151,7 @@ function observeChat() {
     ui.refreshTransformRow();
 }
 
-/** The bar follows the host's generating markers directly; GENERATION_ENDED does not fire on narrow viewports. */
+/** Follow the host markers as well as its completion events. */
 function observeBusy() {
     const sendForm = document.getElementById('send_form');
     if (busyObserver || !sendForm) {
@@ -167,7 +175,7 @@ function mountAll() {
     ui.bindEscapeSave();
     ui.bindSelectionWatch();
     ui.ensureMenuItem({ onToggle: () => setEnabled(!api.isEnabled(), { renderDrawer: true }) });
-    ui.ensureDrawer({ onChatToggle: setEnabled, onChange: () => apply({ renderDrawer: false }) });
+    ui.ensureDrawer({ onChatToggle: setEnabled, onChange: () => apply() });
     observeChat();
     observeBusy();
     api.registerCommands({ onToggle: onStoryCommand });
@@ -191,7 +199,8 @@ function start() {
                     api.clearDirection();
                     return;
                 }
-                ui.clearDirectionInput(action.direction);
+                if (action.success) ui.clearDirectionInput(action.direction);
+                ui.reportGenerationResult(action);
                 scheduleStamp();
             },
             busyChanged: (busy) => active && ui.setBusy(busy),
@@ -208,6 +217,7 @@ function start() {
             api.clearDirection();
             ui.clearDirectionInput();
             ui.cancelTransform();
+            ui.cleanupStamps();
             ui.setBusy(api.isBusy());
             apply();
         });
@@ -257,6 +267,7 @@ function start() {
         busyObserver?.disconnect();
         busyObserver = null;
         cancelAnimationFrame(stampFrame);
+        api.releaseAgentGate();
         ui.unmountAll();
         throw error;
     }

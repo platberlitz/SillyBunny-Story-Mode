@@ -22,7 +22,6 @@ import {
     resolveEnabled,
     textRevision,
     canRevertBlock,
-    isReasoningPayload,
     estimateTokens,
     extractReasonings,
     formatDuration,
@@ -227,24 +226,8 @@ test('canRevertBlock allows recorded continuations and plain model blocks only',
     assert.equal(canRevertBlock(null), false);
 });
 
-test('isReasoningPayload identifies reasoning requests across multiple providers and models', () => {
-    assert.equal(isReasoningPayload({ include_reasoning: true }), true);
-    assert.equal(isReasoningPayload({ reasoning_effort: 'low' }), true);
-    assert.equal(isReasoningPayload({ reasoning_effort: 'none' }), false);
-    assert.equal(isReasoningPayload({ thinking: { type: 'enabled', budget_tokens: 1024 } }), true);
-    assert.equal(isReasoningPayload({ max_completion_tokens: 2000 }), true);
-    assert.equal(isReasoningPayload({ model: 'o1-preview' }), true);
-    assert.equal(isReasoningPayload({ model: 'o3-mini' }), true);
-    assert.equal(isReasoningPayload({ model: 'deepseek/deepseek-r1' }), true);
-    assert.equal(isReasoningPayload({ model: 'google/gemini-2.0-flash-thinking-exp' }), true);
-    assert.equal(isReasoningPayload({ model_name: 'kimi-k2-thinking' }), true);
-    assert.equal(isReasoningPayload({ model: 'gpt-4o' }), false);
-    assert.equal(isReasoningPayload({ model: 'claude-3-5-sonnet-20241022' }), false);
-    assert.equal(isReasoningPayload(null), false);
-});
-
-test('estimateTokens calculates token length with context or fallback', () => {
-    assert.equal(estimateTokens('Hello world', { getTokenCount: (t) => t.length * 2 }), 22);
+test('estimateTokens never calls the blocking host tokenizer', () => {
+    assert.equal(estimateTokens('Hello world', { getTokenCount() { assert.fail('blocking tokenizer called'); } }), 4);
     assert.equal(estimateTokens('1234567'), 2);
     assert.equal(estimateTokens(''), 0);
 });
@@ -279,12 +262,18 @@ test('extractReasonings extracts host and story mode recorded reasoning', () => 
     assert.deepEqual(extractReasonings({}), []);
 });
 
-test('formatDuration formats seconds into concise human readable strings', () => {
+test('formatDuration formats host milliseconds into concise human readable strings', () => {
     assert.equal(formatDuration(0), '0s');
-    assert.equal(formatDuration(5), '5s');
-    assert.equal(formatDuration(59), '59s');
-    assert.equal(formatDuration(60), '1m');
-    assert.equal(formatDuration(95), '1m 35s');
-    assert.equal(formatDuration(120), '2m');
-    assert.equal(formatDuration('45'), '45s');
+    assert.equal(formatDuration(5000), '5s');
+    assert.equal(formatDuration(59000), '59s');
+    assert.equal(formatDuration(60000), '1m');
+    assert.equal(formatDuration(95000), '1m 35s');
+    assert.equal(formatDuration(120000), '2m');
+    assert.equal(formatDuration('45000'), '45s');
+    assert.equal(formatDuration(-1000), '0s');
+    assert.equal(formatDuration(1499), '1s');
+});
+
+test('reasoning-only story metadata does not prevent model block recovery', () => {
+    assert.equal(canRevertBlock({ is_user: false, mes: 'story', extra: { story_mode: { reasonings: [{ cut: 0, text: 'thought' }] } } }), true);
 });
